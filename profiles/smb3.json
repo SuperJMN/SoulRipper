@@ -1,0 +1,231 @@
+{
+  "name": "Super Mario Bros. 3",
+  "short": "SMB3",
+  "rom_md5": "86d1982fea7342c0af9679ddf3869d8d",
+  "system": "NES / Famicom",
+  "author": "Koji Kondo",
+  "date": "1988",
+  "boot_frames": 181,
+  "max_frames": 240,
+  "channel_enable": 31,
+  "notes": "SFX extracted from ROM via APU register capture (FCEUX). Sound engine driven by RAM sound queues; music/pause queues excluded.",
+  "sfx": [
+    {
+      "name": "Player - Jump",
+      "id": "Player_Jump",
+      "queue": 1265,
+      "value": 1,
+      "done_watch": 1249
+    },
+    {
+      "name": "Player - Bump",
+      "id": "Player_Bump",
+      "queue": 1265,
+      "value": 2,
+      "done_watch": 1249
+    },
+    {
+      "name": "Player - Swim/Squish",
+      "id": "Player_Swim-Squish",
+      "queue": 1265,
+      "value": 4,
+      "done_watch": 1249
+    },
+    {
+      "name": "Player - Kick",
+      "id": "Player_Kick",
+      "queue": 1265,
+      "value": 8,
+      "done_watch": 1249
+    },
+    {
+      "name": "Player - Pipe/Shrink",
+      "id": "Player_Pipe-Shrink",
+      "queue": 1265,
+      "value": 16,
+      "done_watch": 1249
+    },
+    {
+      "name": "Player - Fireball",
+      "id": "Player_Fireball",
+      "queue": 1265,
+      "value": 32,
+      "done_watch": 1249
+    },
+    {
+      "name": "Player - PowerRing",
+      "id": "Player_PowerRing",
+      "queue": 1265,
+      "value": 64,
+      "done_watch": 1249
+    },
+    {
+      "name": "Player - FrogHop",
+      "id": "Player_FrogHop",
+      "queue": 1265,
+      "value": 128,
+      "done_watch": 1249
+    },
+    {
+      "name": "Level1 - Coin",
+      "id": "Level1_Coin",
+      "queue": 1266,
+      "value": 1,
+      "done_watch": 1250
+    },
+    {
+      "name": "Level1 - Rise",
+      "id": "Level1_Rise",
+      "queue": 1266,
+      "value": 2,
+      "done_watch": 1250
+    },
+    {
+      "name": "Level1 - Vine",
+      "id": "Level1_Vine",
+      "queue": 1266,
+      "value": 4,
+      "done_watch": 1250
+    },
+    {
+      "name": "Level1 - Baboom",
+      "id": "Level1_Baboom",
+      "queue": 1266,
+      "value": 8,
+      "done_watch": 1250
+    },
+    {
+      "name": "Level1 - Blip",
+      "id": "Level1_Blip",
+      "queue": 1266,
+      "value": 16,
+      "done_watch": 1250
+    },
+    {
+      "name": "Level1 - Power",
+      "id": "Level1_Power",
+      "queue": 1266,
+      "value": 32,
+      "done_watch": 1250
+    },
+    {
+      "name": "Level1 - 1UP",
+      "id": "Level1_1UP",
+      "queue": 1266,
+      "value": 64,
+      "done_watch": 1250
+    },
+    {
+      "name": "Level1 - Poof",
+      "id": "Level1_Poof",
+      "queue": 1266,
+      "value": 128,
+      "done_watch": 1250
+    },
+    {
+      "name": "Level1 - Unk90",
+      "id": "Level1_Unk90",
+      "queue": 1266,
+      "value": 144,
+      "done_watch": 1250
+    },
+    {
+      "name": "Level1 - Shoe",
+      "id": "Level1_Shoe",
+      "queue": 1266,
+      "value": 160,
+      "done_watch": 1250
+    },
+    {
+      "name": "Level1 - TailWag",
+      "id": "Level1_TailWag",
+      "queue": 1266,
+      "value": 176,
+      "done_watch": 1250
+    },
+    {
+      "name": "Level2 - Crumble",
+      "id": "Level2_Crumble",
+      "queue": 1267,
+      "value": 1,
+      "done_watch": 1251
+    },
+    {
+      "name": "Level2 - Flame",
+      "id": "Level2_Flame",
+      "queue": 1267,
+      "value": 2,
+      "done_watch": 1251
+    },
+    {
+      "name": "Level2 - Boomerang",
+      "id": "Level2_Boomerang",
+      "queue": 1267,
+      "value": 4,
+      "done_watch": 1251
+    },
+    {
+      "name": "Level2 - Airship",
+      "id": "Level2_Airship",
+      "queue": 1267,
+      "value": 8,
+      "done_watch": 1251
+    },
+    {
+      "name": "Level2 - March",
+      "id": "Level2_March",
+      "queue": 1267,
+      "value": 16,
+      "done_watch": 1251
+    },
+    {
+      "name": "Level2 - Skid",
+      "id": "Level2_Skid",
+      "queue": 1267,
+      "value": 128,
+      "done_watch": 1251
+    },
+    {
+      "name": "Map - EnterWorld",
+      "id": "Map_EnterWorld",
+      "queue": 1270,
+      "value": 1,
+      "done_watch": 1254
+    },
+    {
+      "name": "Map - PathMove",
+      "id": "Map_PathMove",
+      "queue": 1270,
+      "value": 2,
+      "done_watch": 1254
+    },
+    {
+      "name": "Map - EnterLevel",
+      "id": "Map_EnterLevel",
+      "queue": 1270,
+      "value": 4,
+      "done_watch": 1254
+    },
+    {
+      "name": "Map - InventoryFlip",
+      "id": "Map_InventoryFlip",
+      "queue": 1270,
+      "value": 8,
+      "done_watch": 1254
+    },
+    {
+      "name": "Map - BonusAppear",
+      "id": "Map_BonusAppear",
+      "queue": 1270,
+      "value": 16,
+      "done_watch": 1254
+    },
+    {
+      "name": "Map - Deny",
+      "id": "Map_Deny",
+      "queue": 1270,
+      "value": 128,
+      "done_watch": 1254
+    }
+  ]
+}

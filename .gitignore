@@ -1,0 +1,18 @@
+# Local FCEUX emulator (fetched via setup_fceux.sh, no root)
+/tools/
+
+# Generated output (derived from copyrighted ROMs)
+/out/
+*.vgm
+*.wav
+
+# ROMs (never commit copyrighted game data)
+*.nes
+*.zip
+
+# Downloaded packages
+*.deb
+
+# Python
+__pycache__/
+*.pyc

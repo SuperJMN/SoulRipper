@@ -26,6 +26,7 @@ internal static class Program
         {
             "record" => RunRecord(opt),
             "sweep" => RunSweep(opt),
+            "finddiff" => RunFindDiff(opt),
             _ => Usage(),
         };
     }
@@ -34,9 +35,74 @@ internal static class Program
     {
         Console.Error.WriteLine(
             "usage:\n" +
-            "  gbsweep record --rom game.gb --boot N --frames M --out capture.txt\n" +
-            "  gbsweep sweep  --rom game.gb --profile p.json --out capture.txt");
+            "  gbsweep record   --rom game.gb --boot N --frames M --out capture.txt\n" +
+            "  gbsweep sweep    --rom game.gb --profile p.json --out capture.txt\n" +
+            "  gbsweep finddiff --rom game.gb --profile p.json --trigger down --frames N");
         return 2;
+    }
+
+    // ---- finddiff: locate a sound-request RAM byte by input differencing -----
+    // The engine clears the request byte every frame, and the game sets it for
+    // less than a frame, so we can't observe the value directly. Instead we diff
+    // the per-address WRITE COUNT between an idle run and a triggered run: the
+    // request byte (and a few input-state bytes) receive an extra write only when
+    // the SFX is triggered.
+    private static int RunFindDiff(Dictionary<string, string> opt)
+    {
+        var rom = Req(opt, "rom");
+        var frames = int.Parse(opt.GetValueOrDefault("frames", "20"));
+        var trigger = ParseButton(Req(opt, "trigger"));
+        using var doc = JsonDocument.Parse(File.ReadAllText(Req(opt, "profile")));
+        var reach = doc.RootElement.GetProperty("reach");
+
+        var s = Load(rom);
+
+        Reach(s, reach);
+        var refDelta = CountDeltas(s, frames, press: null);
+
+        Reach(s, reach);
+        var testDelta = CountDeltas(s, frames, press: trigger);
+
+        Console.Error.WriteLine($"[finddiff] addresses written MORE when '{opt["trigger"]}' pressed:");
+        var hits = 0;
+        for (var i = 0; i < WramLen; i++)
+        {
+            if (testDelta[i] > refDelta[i])
+            {
+                var addr = WramBase + i;
+                var extra = testDelta[i] - refDelta[i];
+                Console.Error.WriteLine($"  {addr:X4}  +{extra} writes (ref {refDelta[i]}, test {testDelta[i]})");
+                hits++;
+            }
+        }
+        if (hits == 0) Console.Error.WriteLine("  (none - input may not trigger a sound in this state)");
+        return 0;
+    }
+
+    private const int WramBase = 0xC000;
+    private const int WramLen = 0x2000;   // C000-DFFF
+
+    private static ulong[] WramCounts(ManagedGameBoyDebugSession s)
+    {
+        var counts = new ulong[WramLen];
+        for (var chunk = 0; chunk < WramLen; chunk += 0x1000)
+        {
+            var w = s.FindLastWriters((ushort)(WramBase + chunk), 0x1000).Value.Writers;
+            for (var i = 0; i < 0x1000; i++) counts[chunk + i] = w[i].WriteCount;
+        }
+        return counts;
+    }
+
+    private static ulong[] CountDeltas(ManagedGameBoyDebugSession s, int frames, JoypadButton? press)
+    {
+        var start = WramCounts(s);
+        if (press is JoypadButton b) s.PressButtons(new[] { b }, 2);
+        else s.RunFrame(2);                 // keep both runs frame-aligned
+        s.RunFrame(frames);
+        var end = WramCounts(s);
+        var d = new ulong[WramLen];
+        for (var i = 0; i < WramLen; i++) d[i] = end[i] - start[i];
+        return d;
     }
 
     // ---- record: dump all APU writes for M frames (pipeline validation) -----

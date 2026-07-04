@@ -1,31 +1,58 @@
-# NES SFX → VGM ripper
+# SFX → VGM ripper (NES + Game Boy)
 
-Automated extraction of **sound effects** from NES ROMs into per-effect **VGM**
-files. Drives a headless **FCEUX** with a generated Lua script that, for each
-effect declared in a game *profile*, restores a clean savestate, pokes the
-sound-engine's RAM trigger, and records the APU register writes until the
-effect finishes. Each capture is encoded to its own VGM.
+Automated extraction of **sound effects** from **NES** and **Game Boy** ROMs into
+per-effect **VGM** files. For each effect declared in a game *profile*, the ripper
+drives an emulator to capture the sound-chip register writes the effect produces,
+then encodes each capture as its own VGM.
 
-Because the VGM stores the raw APU register writes, playback is **cycle-exact**
-on any NES-APU-capable player (NSFPlay core, Winamp/foobar + vgmstream, etc.).
+Because the VGM stores the raw register writes, playback is **cycle-exact** on any
+compatible player (NSFPlay/SameBoy cores, foobar2000/Winamp + vgmstream, etc.).
+
+| System | Engine | Isolation strategy | Trigger |
+|--------|--------|--------------------|---------|
+| NES | headless **FCEUX** + Lua | per-effect **savestate** from a silent state | RAM poke of the sound-queue byte |
+| Game Boy | **CoreBoy** (`gb/GbSweep`) | **differential capture** (run twice, subtract music) | RAM poke of the sound-request byte |
 
 ## Why profiles?
-NES ROMs have no standard "play SFX N" API (unlike music via NSF subsongs).
-Each game's sound engine triggers effects its own way — usually by writing an
-ID to a *sound queue* RAM byte. A profile captures that game-specific knowledge:
-which RAM address to poke, the effect IDs, and how to detect "effect finished".
+ROMs have no standard "play SFX N" API (unlike music via NSF/GBS subsongs).
+Each game's sound engine triggers effects its own way — usually by writing an ID
+to a *sound request* RAM byte. A profile captures that game-specific knowledge:
+which RAM address to poke, the effect IDs, and how to reach a state where the
+effect plays.
 
 ## Usage
 ```bash
+# NES
 ./setup_fceux.sh                      # one-time: fetch a local, no-root FCEUX
 python3 ripper.py \
     --rom /path/to/game.nes \
     --profile profiles/smb3.json \
     --out out/SMB3
+
+# Game Boy
+./setup_gb.sh                         # one-time: build gbsweep (needs .NET SDK +
+                                      # sibling GameboyMcp repo, see below)
+python3 ripper.py \
+    --rom /path/to/game.gb \
+    --profile profiles/sml.json \
+    --out out/SML
 ```
-Output: `out/SMB3/NN_<Queue>_<Name>.vgm`, one per effect that produced audio.
-Effects that stay silent in the boot state are listed at the end (they usually
-need an in-level savestate — see "Limitations").
+Output: `out/<GAME>/NN_<Name>.vgm`, one per effect that produced audio.
+The system (NES vs GB) is auto-detected from the profile's `system` field.
+Effects that stayed silent are listed at the end.
+
+## Game Boy backend (`gb/GbSweep`)
+`gbsweep` is a small C# tool that drives the **CoreBoy**-based debug session from
+the [GameboyMcp](https://github.com/) repo (pure managed, no native deps). It is
+expected as a **sibling checkout** (`~/Repos/GameboyMcp` next to this repo);
+`setup_gb.sh` accepts an explicit path otherwise.
+
+Because Game Boy games play music during gameplay, GB effects are isolated by
+**differential capture**: the sweeper reaches a deterministic state, records the
+APU writes for a music-only reference run, then re-reaches the same state and
+records again with the SFX request poked. Only writes the effect *changes* are
+kept — the byte-identical music cancels out, leaving the effect alone on its
+channel. See `profiles/sml.json` (Super Mario Land, sound requests via `$DFE0`).
 
 ## Profile format (`profiles/*.json`)
 ```jsonc
@@ -80,7 +107,11 @@ bytes whose writes reliably precede APU channel activity are trigger
 candidates. Then sweep their values.
 
 ## Files
-- `ripper.py` — orchestrator (FCEUX driver + capture parser).
-- `vgm_writer.py` — reusable NES-APU VGM encoder.
-- `profiles/smb3.json` — Super Mario Bros. 3 (31 effects).
+- `ripper.py` — orchestrator: selects the backend by system, parses captures,
+  writes VGMs.
+- `vgm_writer.py` — reusable VGM encoder for NES APU **and** Game Boy DMG.
+- `gb/GbSweep/` — C# Game Boy sweeper (CoreBoy; `record` and `sweep`/diff modes).
+- `profiles/smb3.json` — Super Mario Bros. 3, NES (31 effects).
+- `profiles/sml.json` — Super Mario Land, Game Boy (11 square-channel effects).
 - `setup_fceux.sh` — fetch local FCEUX (no root).
+- `setup_gb.sh` — build the Game Boy sweeper.

@@ -8,10 +8,20 @@
 
 # ROMs (never commit copyrighted game data)
 *.nes
+*.gb
+*.gbc
 *.zip
+
+# Emulator savestates
+*.sav
+*.state
 
 # Downloaded packages
 *.deb
+
+# .NET build output
+[Bb]in/
+[Oo]bj/
 
 # Python
 __pycache__/

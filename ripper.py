@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Multi-game NES SFX -> VGM ripper.
+"""Multi-system SFX -> VGM ripper (NES APU and Game Boy DMG).
 
-Drives FCEUX (headless) with a generated Lua script that, for each sound
-effect declared in a game profile, restores a clean savestate, pokes the
-sound-queue RAM byte, and records the APU register writes until the effect
-finishes.  Each captured effect is written to its own VGM file.
+For each sound effect declared in a game profile, the ripper drives an emulator
+to capture the sound-chip register writes the effect produces, then encodes each
+capture as its own VGM file.
+
+- NES: headless FCEUX + Lua; per-effect savestate isolation, RAM-poke trigger.
+- GB:  CoreBoy-based `gbsweep` (gb/GbSweep); differential capture cancels music.
 
 Usage:
     python3 ripper.py --rom smb3.nes --profile profiles/smb3.json --out out/SMB3
+    python3 ripper.py --rom sml.gb   --profile profiles/sml.json  --out out/SML
 """
 import argparse
 import json
@@ -18,10 +21,11 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from vgm_writer import write_vgm
+from vgm_writer import write_vgm, write_vgm_gb
 
 FCEUX = os.path.join(HERE, "tools", "fceux", "usr", "games", "fceux")
 FCEUX_LIBS = os.path.join(HERE, "tools", "fceux", "usr", "lib", "x86_64-linux-gnu")
+GBSWEEP_DLL = os.path.join(HERE, "gb", "GbSweep", "bin", "Release", "net10.0", "gbsweep.dll")
 
 LUA_TEMPLATE = r"""
 -- AUTO-GENERATED sweep script
@@ -92,16 +96,45 @@ def gen_lua(profile, capture_path):
     )
 
 
-def run_fceux(rom, lua_path, log_path):
+def run_fceux(rom, lua_path, log_path, expected_sfx, timeout=180):
+    """Launch headless FCEUX and wait until the Lua has written all effects.
+
+    FCEUX can fail to exit cleanly under the offscreen platform, so rather than
+    depend on process exit we poll the capture file for completion (one SFXEND
+    per effect) and then terminate the process. This also avoids leaking stuck
+    emulator processes across runs.
+    """
+    import time
+    capture_path = None
+    # derive capture path from the generated lua (OUT = "...")
+    for line in open(lua_path):
+        m = re.match(r'\s*local OUT = "(.+)"', line)
+        if m:
+            capture_path = m.group(1)
+            break
     env = dict(os.environ)
     env["LD_LIBRARY_PATH"] = FCEUX_LIBS + ":" + env.get("LD_LIBRARY_PATH", "")
     env["QT_QPA_PLATFORM"] = "offscreen"
-    with open(log_path, "wb") as log:
-        # FCEUX segfaults harmlessly on teardown; ignore the return code.
-        subprocess.run(
-            [FCEUX, "--sound", "0", "--loadlua", lua_path, rom],
-            env=env, stdout=log, stderr=subprocess.STDOUT, timeout=300,
-        )
+    log = open(log_path, "wb")
+    proc = subprocess.Popen(
+        [FCEUX, "--sound", "0", "--loadlua", lua_path, rom],
+        env=env, stdout=log, stderr=subprocess.STDOUT,
+    )
+    try:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                break                      # FCEUX exited on its own
+            if capture_path and os.path.exists(capture_path):
+                done = open(capture_path).read().count("SFXEND")
+                if done >= expected_sfx:
+                    break
+            time.sleep(0.3)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=10)
+        log.close()
 
 
 def parse_capture(path):
@@ -130,28 +163,62 @@ def has_output(writes):
     return False
 
 
+def has_output_gb(writes):
+    for _, addr, _ in writes:
+        if 0xFF10 <= addr <= 0xFF25 or 0xFF30 <= addr <= 0xFF3F:
+            return True
+    return False
+
+
+def run_gbsweep(rom, profile_path, capture_path, log_path):
+    if not os.path.exists(GBSWEEP_DLL):
+        print("[!] gbsweep not built. Run:  ./setup_gb.sh   (needs .NET + sibling "
+              "GameboyMcp repo)", file=sys.stderr)
+        sys.exit(1)
+    with open(log_path, "wb") as log:
+        subprocess.run(
+            ["dotnet", GBSWEEP_DLL, "sweep",
+             "--rom", rom, "--profile", profile_path, "--out", capture_path],
+            stdout=log, stderr=subprocess.STDOUT, timeout=1200, check=True,
+        )
+
+
+def system_of(profile):
+    return "gb" if str(profile.get("system", "")).lower().startswith("game boy") else "nes"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rom", required=True)
     ap.add_argument("--profile", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--system", choices=["auto", "nes", "gb"], default="auto")
     ap.add_argument("--keep-empty", action="store_true",
                     help="also write VGMs for effects that produced no audio")
     args = ap.parse_args()
 
     profile = json.load(open(args.profile))
+    system = system_of(profile) if args.system == "auto" else args.system
     out_dir = os.path.abspath(args.out)
     rom = os.path.abspath(args.rom)
     os.makedirs(out_dir, exist_ok=True)
 
     capture_path = os.path.join(out_dir, "_capture.txt")
-    lua_path = os.path.join(out_dir, "_sweep.lua")
-    log_path = os.path.join(out_dir, "_fceux.log")
+    log_path = os.path.join(out_dir, "_engine.log")
 
-    open(lua_path, "w").write(gen_lua(profile, capture_path))
-
-    print(f"[*] {profile['name']}: sweeping {len(profile['sfx'])} effects via FCEUX...")
-    run_fceux(rom, lua_path, log_path)
+    print(f"[*] {profile['name']} [{system}]: sweeping "
+          f"{len(profile['sfx'])} effects...")
+    if system == "gb":
+        run_gbsweep(rom, os.path.abspath(args.profile), capture_path, log_path)
+        vgm_fn = lambda path, writes, gd3: write_vgm_gb(path, writes, gd3=gd3)
+        audio_ok = has_output_gb
+    else:
+        lua_path = os.path.join(out_dir, "_sweep.lua")
+        open(lua_path, "w").write(gen_lua(profile, capture_path))
+        run_fceux(rom, lua_path, log_path, expected_sfx=len(profile["sfx"]))
+        ce = profile.get("channel_enable", 0x1F)
+        vgm_fn = lambda path, writes, gd3: write_vgm(path, writes, channel_enable=ce, gd3=gd3)
+        audio_ok = has_output
 
     if not os.path.exists(capture_path):
         print("[!] no capture produced - see", log_path)
@@ -163,7 +230,7 @@ def main():
     written, empty = 0, []
     for i, s in enumerate(profile["sfx"], 1):
         writes = effects.get(s["id"], [])
-        if not writes or not has_output(writes):
+        if not writes or not audio_ok(writes):
             empty.append(s["id"])
             if not args.keep_empty:
                 continue
@@ -176,19 +243,15 @@ def main():
             "date": meta["date"],
             "notes": profile.get("notes", ""),
         }
-        info = write_vgm(
-            os.path.join(out_dir, fname), writes,
-            channel_enable=profile.get("channel_enable", 0x1F),
-            gd3=gd3,
-        )
+        info = vgm_fn(os.path.join(out_dir, fname), writes, gd3)
         written += 1
         print(f"    [{i:02d}] {s['name']:<22} {info['seconds']:.2f}s  "
               f"{len(writes)} writes -> {fname}")
 
     print(f"[*] done: {written} VGM(s) in {out_dir}")
     if empty:
-        print(f"[i] {len(empty)} effect(s) produced no audio in this state "
-              f"(likely need an in-level savestate): {', '.join(empty)}")
+        print(f"[i] {len(empty)} effect(s) produced no audio in this state: "
+              f"{', '.join(empty)}")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,28 @@
+{
+  "name": "Super Mario Land",
+  "short": "SML",
+  "system": "Game Boy",
+  "author": "Hirokazu Tanaka",
+  "date": "1989",
+  "notes": "SFX extracted from ROM via differential APU capture (CoreBoy). Square-channel SFX requested through RAM $DFE0; music cancelled out by run-to-run diff. (Noise-set SFX are event-triggered without a request byte and are not included.)",
+  "reach": {
+    "boot": 240,
+    "presses": [ { "buttons": ["Start"], "hold": 8 } ],
+    "settle": 40
+  },
+  "capture_frames": 100,
+  "isolate": "diff",
+  "sfx": [
+    { "name": "Jump",      "id": "Jump",      "queue": "0xDFE0", "value": 1 },
+    { "name": "Superball", "id": "Superball", "queue": "0xDFE0", "value": 2 },
+    { "name": "Stomp",     "id": "Stomp",     "queue": "0xDFE0", "value": 3 },
+    { "name": "Grow",      "id": "Grow",      "queue": "0xDFE0", "value": 4 },
+    { "name": "Coin",      "id": "Coin",      "queue": "0xDFE0", "value": 5 },
+    { "name": "Injury",    "id": "Injury",    "queue": "0xDFE0", "value": 6 },
+    { "name": "Bump",      "id": "Bump",      "queue": "0xDFE0", "value": 7 },
+    { "name": "1UP",       "id": "1UP",       "queue": "0xDFE0", "value": 8 },
+    { "name": "Gira",      "id": "Gira",      "queue": "0xDFE0", "value": 9 },
+    { "name": "TimerTick", "id": "TimerTick", "queue": "0xDFE0", "value": 10 },
+    { "name": "Flower",    "id": "Flower",    "queue": "0xDFE0", "value": 11 }
+  ]
+}

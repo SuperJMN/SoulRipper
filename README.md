@@ -36,10 +36,18 @@ python3 ripper.py \
     --rom /path/to/game.gb \
     --profile profiles/sml.json \
     --out out/SML
+
+# Super Mario Land 2 directly from a zipped ROM
+python3 ripper.py \
+    --rom "/mnt/store/Juegos/ROMs/Gameboy/Super Mario Land 2 - 6 Golden Coins (USA, Europe).zip" \
+    --profile profiles/sml2.json \
+    --out out/SML2
 ```
 Output: `out/<GAME>/NN_<Name>.vgm`, one per effect that produced audio.
 The system (NES vs GB) is auto-detected from the profile's `system` field.
 Effects that stayed silent are listed at the end.
+`--rom` may point to a plain ROM or to a `.zip` containing exactly one
+supported ROM (`.nes`, `.gb`, or `.gbc`).
 
 ## Game Boy backend (`gb/GbSweep`)
 `gbsweep` is a small C# tool that drives the **CoreBoy**-based debug session from
@@ -53,6 +61,8 @@ APU writes for a music-only reference run, then re-reaches the same state and
 records again with the SFX request poked. Only writes the effect *changes* are
 kept — the byte-identical music cancels out, leaving the effect alone on its
 channel. See `profiles/sml.json` (Super Mario Land, sound requests via `$DFE0`).
+`profiles/sml2.json` covers Super Mario Land 2 by driving the engine's three
+SFX request queues: `$A460` (square/pulse), `$A470` (wave), and `$A478` (noise).
 
 ## Profile format (`profiles/*.json`)
 ```jsonc
@@ -113,5 +123,6 @@ candidates. Then sweep their values.
 - `gb/GbSweep/` — C# Game Boy sweeper (CoreBoy; `record` and `sweep`/diff modes).
 - `profiles/smb3.json` — Super Mario Bros. 3, NES (31 effects).
 - `profiles/sml.json` — Super Mario Land, Game Boy (11 square-channel effects).
+- `profiles/sml2.json` — Super Mario Land 2, Game Boy (57 engine SFX queue values).
 - `setup_fceux.sh` — fetch local FCEUX (no root).
 - `setup_gb.sh` — build the Game Boy sweeper.

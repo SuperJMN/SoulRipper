@@ -13,11 +13,14 @@ Usage:
     python3 ripper.py --rom sml.gb   --profile profiles/sml.json  --out out/SML
 """
 import argparse
+import contextlib
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
+import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -26,6 +29,7 @@ from vgm_writer import write_vgm, write_vgm_gb
 FCEUX = os.path.join(HERE, "tools", "fceux", "usr", "games", "fceux")
 FCEUX_LIBS = os.path.join(HERE, "tools", "fceux", "usr", "lib", "x86_64-linux-gnu")
 GBSWEEP_DLL = os.path.join(HERE, "gb", "GbSweep", "bin", "Release", "net10.0", "gbsweep.dll")
+SUPPORTED_ROM_EXTS = {".nes", ".gb", ".gbc"}
 
 LUA_TEMPLATE = r"""
 -- AUTO-GENERATED sweep script
@@ -187,6 +191,40 @@ def system_of(profile):
     return "gb" if str(profile.get("system", "")).lower().startswith("game boy") else "nes"
 
 
+@contextlib.contextmanager
+def resolve_rom_path(path):
+    """Yield a real ROM path, extracting .zip archives to a temp file if needed."""
+    rom_path = os.path.abspath(path)
+    if not zipfile.is_zipfile(rom_path):
+        yield rom_path
+        return
+
+    with zipfile.ZipFile(rom_path) as zf:
+        entries = [
+            info for info in zf.infolist()
+            if not info.is_dir()
+            and os.path.splitext(info.filename)[1].lower() in SUPPORTED_ROM_EXTS
+        ]
+        if not entries:
+            raise ValueError(f"zip contains no supported ROM: {path}")
+        if len(entries) > 1:
+            names = ", ".join(info.filename for info in entries)
+            raise ValueError(f"zip contains multiple supported ROMs; choose one: {names}")
+
+        suffix = os.path.splitext(entries[0].filename)[1]
+        with tempfile.NamedTemporaryFile(prefix="sfx-ripper-", suffix=suffix, delete=False) as tmp:
+            tmp.write(zf.read(entries[0]))
+            tmp_path = tmp.name
+
+    try:
+        yield tmp_path
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rom", required=True)
@@ -200,7 +238,6 @@ def main():
     profile = json.load(open(args.profile))
     system = system_of(profile) if args.system == "auto" else args.system
     out_dir = os.path.abspath(args.out)
-    rom = os.path.abspath(args.rom)
     os.makedirs(out_dir, exist_ok=True)
 
     capture_path = os.path.join(out_dir, "_capture.txt")
@@ -208,17 +245,18 @@ def main():
 
     print(f"[*] {profile['name']} [{system}]: sweeping "
           f"{len(profile['sfx'])} effects...")
-    if system == "gb":
-        run_gbsweep(rom, os.path.abspath(args.profile), capture_path, log_path)
-        vgm_fn = lambda path, writes, gd3: write_vgm_gb(path, writes, gd3=gd3)
-        audio_ok = has_output_gb
-    else:
-        lua_path = os.path.join(out_dir, "_sweep.lua")
-        open(lua_path, "w").write(gen_lua(profile, capture_path))
-        run_fceux(rom, lua_path, log_path, expected_sfx=len(profile["sfx"]))
-        ce = profile.get("channel_enable", 0x1F)
-        vgm_fn = lambda path, writes, gd3: write_vgm(path, writes, channel_enable=ce, gd3=gd3)
-        audio_ok = has_output
+    with resolve_rom_path(args.rom) as rom:
+        if system == "gb":
+            run_gbsweep(rom, os.path.abspath(args.profile), capture_path, log_path)
+            vgm_fn = lambda path, writes, gd3: write_vgm_gb(path, writes, gd3=gd3)
+            audio_ok = has_output_gb
+        else:
+            lua_path = os.path.join(out_dir, "_sweep.lua")
+            open(lua_path, "w").write(gen_lua(profile, capture_path))
+            run_fceux(rom, lua_path, log_path, expected_sfx=len(profile["sfx"]))
+            ce = profile.get("channel_enable", 0x1F)
+            vgm_fn = lambda path, writes, gd3: write_vgm(path, writes, channel_enable=ce, gd3=gd3)
+            audio_ok = has_output
 
     if not os.path.exists(capture_path):
         print("[!] no capture produced - see", log_path)

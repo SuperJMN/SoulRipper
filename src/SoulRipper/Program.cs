@@ -31,7 +31,7 @@ internal static class Program
         }
         catch (Exception ex) when (ex is ArgumentException or IOException or InvalidOperationException or FormatException)
         {
-            Console.Error.WriteLine($"soul-ripper: {ex.Message}");
+            Console.Error.WriteLine($"soulripper: {ex.Message}");
             return 1;
         }
     }
@@ -43,7 +43,7 @@ internal static class Program
             SoulRipper: rips the music, jingles and sound effects of a NES or Game Boy ROM to VGM.
 
             usage:
-              soul-ripper <rom> [options]          rom: .nes, .gb, .gbc, or a zip/7z holding one
+              soulripper <rom> [options]          rom: .nes, .gb, .gbc, or a zip/7z holding one
 
             options:
               --out DIR          output folder (default: the game's name)
@@ -56,9 +56,9 @@ internal static class Program
               --jobs N           worker processes (default: cores - 1)
 
             advanced:
-              soul-ripper discover <rom> --out report.json [--queues A460,A468] [--extra 04F5] [--no-rebase]
-              soul-ripper bench <rom> [--frames N]
-              soul-ripper access <rom> --addr A460,A470 [--frames N]
+              soulripper discover <rom> --out report.json [--queues A460,A468] [--extra 04F5] [--no-rebase]
+              soulripper bench <rom> [--frames N]
+              soulripper access <rom> --addr A460,A470 [--frames N]
             """);
         return 2;
     }

@@ -20,7 +20,7 @@ internal static class GbsPlayer
             throw new ArgumentException($"GBS load address {load:X4} leaves no room for the player stub");
 
         var tracks = new List<PlayedTrack>();
-        var romPath = Path.Combine(Path.GetTempPath(), $"soul-ripper-gbs-{Environment.ProcessId}.gb");
+        var romPath = Path.Combine(Path.GetTempPath(), $"soulripper-gbs-{Environment.ProcessId}.gb");
         try
         {
             for (var track = 0; track < count; track++)

@@ -4,7 +4,7 @@ namespace SoulRipper.Tests;
 
 public sealed class RomFileTests : IDisposable
 {
-    private readonly string dir = Directory.CreateTempSubdirectory("soul-ripper-tests-").FullName;
+    private readonly string dir = Directory.CreateTempSubdirectory("soulripper-tests-").FullName;
 
     public void Dispose() => Directory.Delete(dir, recursive: true);
 

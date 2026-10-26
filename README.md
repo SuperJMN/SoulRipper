@@ -12,19 +12,19 @@ Benben, NSFPlay/SameBoy cores, etc.).
 ## Install
 
 ```bash
-dotnet tool install -g SoulRipper
+dotnet tool install -g SoulRipper.Tool
 ```
 
 Or run it without installing, with .NET 10's `dnx`:
 
 ```bash
-dnx SoulRipper game.gb
+dnx SoulRipper.Tool game.gb
 ```
 
 ## Usage
 
 ```bash
-soul-ripper "Super Mario Land (World).gb"
+soulripper "Super Mario Land (World).gb"
 ```
 
 The ROM can be a `.nes`, `.gb` or `.gbc` file, or a zip/7z holding one.
@@ -89,7 +89,7 @@ NSF/GBS set is fetched from [joshw.info](https://joshw.info):
 - each rip track is paired with the capture it requests or sounds like, and
   the capture takes its name.
 
-Downloads are cached in `~/.cache/soul-ripper`.
+Downloads are cached in `~/.cache/soulripper`.
 
 ## Profiles
 
@@ -118,9 +118,9 @@ start from.
 ## Advanced commands
 
 ```bash
-soul-ripper discover game.gb --out report.json [--queues A460,A468] [--extra 04F5] [--no-rebase]
-soul-ripper bench game.gb [--frames N]          # emulation speed, savestate replay check
-soul-ripper access game.gb --addr A460,A470     # code that reads/writes those bytes
+soulripper discover game.gb --out report.json [--queues A460,A468] [--extra 04F5] [--no-rebase]
+soulripper bench game.gb [--frames N]          # emulation speed, savestate replay check
+soulripper access game.gb --addr A460,A470     # code that reads/writes those bytes
 ```
 
 `discover` writes the raw result (driver, every probed byte, every capture);

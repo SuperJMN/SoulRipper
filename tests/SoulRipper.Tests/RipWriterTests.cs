@@ -6,7 +6,7 @@ namespace SoulRipper.Tests;
 
 public sealed class RipWriterTests : IDisposable
 {
-    private readonly string outDir = Directory.CreateTempSubdirectory("soul-ripper-tests-").FullName;
+    private readonly string outDir = Directory.CreateTempSubdirectory("soulripper-tests-").FullName;
 
     public void Dispose() => Directory.Delete(outDir, recursive: true);
 

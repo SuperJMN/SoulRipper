@@ -5,7 +5,7 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <AssemblyName>soul-ripper</AssemblyName>
+    <AssemblyName>soulripper</AssemblyName>
     <RootNamespace>SoulRipper</RootNamespace>
     <ServerGarbageCollection>false</ServerGarbageCollection>
     <TieredPGO>true</TieredPGO>
@@ -13,8 +13,8 @@
 
   <PropertyGroup>
     <PackAsTool>true</PackAsTool>
-    <ToolCommandName>soul-ripper</ToolCommandName>
-    <PackageId>SoulRipper</PackageId>
+    <ToolCommandName>soulripper</ToolCommandName>
+    <PackageId>SoulRipper.Tool</PackageId>
     <Title>SoulRipper</Title>
     <Description>Rips the music, jingles and sound effects of NES and Game Boy ROMs to VGM files, with no per-game setup: it finds the game's sound requests by itself and names the tracks from community rips.</Description>
     <Authors>SuperJMN</Authors>

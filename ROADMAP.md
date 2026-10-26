@@ -6,7 +6,7 @@ Dream Land (GB); Super Mario Bros. 1 and 3, Mega Man 2, Zelda (NES).
 
 ## Done
 
-- C# tool (`soul-ripper`, PackageId `SoulRipper`) replacing the Python
+- C# tool (`soulripper`, PackageId `SoulRipper.Tool`) replacing the Python
   scripts, FCEUX and `gbsweep`: discovery engine, worker pool, NSF/GBS
   players, online hints (No-Intro + joshw.info), VGM writer, output folders,
   draft profiles; 26 unit tests.

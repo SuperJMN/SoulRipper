@@ -21,13 +21,14 @@ internal sealed class GameBoyMachine : IMachine
     private readonly Gameboy gameboy;
     private readonly Controller controller = new();
     private readonly NullDisplay display = new();
+    private readonly AudioMeter meter = new();
     private Action<ushort, ushort>? read;
 
     public GameBoyMachine(string romPath)
     {
         var options = new GameboyOptions { Rom = romPath, DisableBatterySaves = true, Headless = true };
         var cartridge = new Cartridge(options);
-        gameboy = new Gameboy(options, cartridge, display, controller, new NullSoundOutput(), new NullSerialEndpoint());
+        gameboy = new Gameboy(options, cartridge, display, controller, meter, new NullSerialEndpoint());
         gameboy.Mmu.WriteObserver = OnWrite;
     }
 
@@ -36,6 +37,7 @@ internal sealed class GameBoyMachine : IMachine
     public byte[] ApuShadow { get; private set; } = new byte[SoundChip.GameBoy.Length];
 
     public ushort StackPointer => (ushort)gameboy.Cpu.Registers.SP;
+    public bool Audible { get; private set; }
     public Action? FrameEnded { get; set; }
 
     public Action<ushort, ushort>? Read
@@ -54,6 +56,7 @@ internal sealed class GameBoyMachine : IMachine
         {
             for (var c = 0; c < CyclesPerFrame; c++)
                 gameboy.Tick();
+            Audible = meter.Swing() > 0;
             FrameEnded?.Invoke();
         }
     }
@@ -136,5 +139,28 @@ internal sealed class GameBoyMachine : IMachine
         public void RequestRefresh() { }
         public void WaitForRefresh() { }
         public void Run(CancellationToken token) { }
+    }
+
+    // Range of the mixed output since the last call.
+    private sealed class AudioMeter : ISoundOutput
+    {
+        private int min = int.MaxValue, max = int.MinValue;
+
+        public void Start() { }
+        public void Stop() { }
+
+        public void Play(int left, int right)
+        {
+            var v = left + right;
+            if (v < min) min = v;
+            if (v > max) max = v;
+        }
+
+        public int Swing()
+        {
+            var swing = max >= min ? max - min : 0;
+            (min, max) = (int.MaxValue, int.MinValue);
+            return swing;
+        }
     }
 }

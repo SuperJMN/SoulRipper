@@ -12,17 +12,27 @@ internal sealed class NesMachine : IMachine
     };
 
     private Action<ushort, ushort>? read;
+    private int min = int.MaxValue, max = int.MinValue;
 
     public NesMachine(string romPath)
     {
         if (!NesCore.DebugLoad(File.ReadAllBytes(romPath)))
             throw new InvalidOperationException($"AprNes rejected the ROM: {romPath}");
         NesCore.DebugSetMemoryObservers(OnWrite, null);
+        NesCore.AudioSampleReady = (sample, _) =>
+        {
+            if (sample < min) min = sample;
+            if (sample > max) max = sample;
+        };
     }
 
     public SoundChip Chip => SoundChip.Nes;
     public Action<ushort, byte, ushort>? Write { get; set; }
     public ushort StackPointer => (ushort)(0x0100 | NesCore.DebugReadRegisters().Sp);
+
+    // The output's DC filter drifts by a few units while silent; the quietest
+    // pulse note swings by hundreds.
+    public bool Audible { get; private set; }
     public Action? FrameEnded { get; set; }
     public byte[] ApuShadow { get; private set; } = new byte[SoundChip.Nes.Length];
 
@@ -45,6 +55,8 @@ internal sealed class NesMachine : IMachine
             var start = NesCore.frame_count;
             while (NesCore.frame_count == start)
                 NesCore.DebugStepInstruction();
+            Audible = max - min > 64;
+            (min, max) = (int.MaxValue, int.MinValue);
             FrameEnded?.Invoke();
         }
     }
@@ -89,6 +101,7 @@ internal sealed class NesMachine : IMachine
     public void Dispose()
     {
         NesCore.DebugSetMemoryObservers(null, null);
+        NesCore.AudioSampleReady = null;
         NesCore.exit = true;
     }
 

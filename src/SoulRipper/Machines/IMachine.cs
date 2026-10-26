@@ -18,6 +18,10 @@ internal interface IMachine : IDisposable
     // Last value written to every sound-chip register since power on.
     byte[] ApuShadow { get; }
 
+    // Whether the audio output moved during the last frame: false once every
+    // channel is silent, whatever the registers say.
+    bool Audible { get; }
+
     void RunFrames(int count);
     void Press(IReadOnlyList<string> buttons, int frames);
     object SaveState();

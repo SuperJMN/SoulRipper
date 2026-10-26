@@ -20,16 +20,20 @@ Dream Land (GB); Super Mario Bros. 1 and 3, Mega Man 2, Zelda (NES).
   registers every frame (SMB1 keeps the APU off on its title screen) counts
   as idle, so Start is pressed; the NES stack is page 1 at the real `S`
   (a fixed `0x0100` hid `$00C0-$00FF`, where SMB1 keeps its effect queues).
+- Effects end when they stop being heard, not at their last write: both
+  machines measure their audio output, so a Game Boy note fading through its
+  envelope is kept (SML2's coin: 1.1 s instead of 0.08 s), and requests that
+  write the chip but are never heard are dropped (17 garbage SML2 values).
 - Emulator libraries published to NuGet (`Zafiro.GameBoy.Debug.Emulator`,
-  `Zafiro.Nes.Debug.Emulator`); public repository; Fleet project.
+  `Zafiro.Nes.Debug.Emulator`); public repository; Fleet project; first
+  release (0.1.0, tagged).
 
-## 1. Release
+## 1. Quality of the rips
 
-1. **First release tag** once the first version is on NuGet (see the Fleet
-   notes on GitVersion), so later versions do not collide with it.
-
-## 2. Quality of the rips
-
+0. **Success rate on a batch of games.** Rip some 50 NES and 50 Game Boy
+   ROMs with no profile and record which fail and why (no triggers, wrong
+   reach, request mechanism the engine does not cover). It tells whether
+   the remaining work is a handful of generic strategies or a long tail.
 1. **Loop detection on real music.** On SML (silenced base), most tracks
    (`DFE8` 03-09, 0B, 11-13) run to the 240 s cap without a loop. Check what
    changes in the "static RAM" state hash between periods (frozen bytes,
@@ -45,23 +49,17 @@ Dream Land (GB); Super Mario Bros. 1 and 3, Mega Man 2, Zelda (NES).
    queues: its requests go through a ring buffer, not a byte), SML2.
 4. **Suspect rules for garbage music.** Music that never loops or ends
    within the cap is likely garbage; consider marking it suspect.
-5. **Cut-off tails on Game Boy.** A sound ends when the writes stop, but a
-   GB note keeps decaying through its envelope (`NRx2`), and some drivers
-   switch the chip off (`NR52 = 0`) once nothing is queued, which only
-   happens on the silenced base. SML2's coin (`A460 = 07`) is cut at 0.08 s
-   instead of ringing for 1.1 s. Extend the tail by the envelopes still
-   running and leave out a trailing master-off write.
-6. **Effect names.** Community rips name music only. Effects could be named
+5. **Effect names.** Community rips name music only. Effects could be named
    from the code that requests them (e.g. the request next to a BCD
    increment of a counter), but that does not generalise; a curated name
    database keyed by ROM CRC and request would.
-7. **NSF rips without playlists** (SMB3, Zelda): no track names. Look for
+6. **NSF rips without playlists** (SMB3, Zelda): no track names. Look for
    NSFe sets (`tlbl` chunk) or other playlist sources.
-8. **Ring-buffer request queues** (Mega Man 2): requests written to a
+7. **Ring-buffer request queues** (Mega Man 2): requests written to a
    buffer by a game routine. Detect the routine that writes the buffer and
    call it, or poke buffer + index together.
 
-## 3. Nice to have
+## 2. Nice to have
 
 - `--keep-suspect` per kind; a summary of suspects by reason.
 - Game Boy Color double speed and other systems (SMS/Game Gear PSG, whose

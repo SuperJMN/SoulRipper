@@ -62,7 +62,7 @@ internal sealed class Prober
     private ProbeContext ctx = new(Array.Empty<ushort>(), 0xFFFF, 0, Array.Empty<ushort>(), null, new(), 0);
     private HashSet<ushort> guarded = new();
     private readonly Dictionary<ushort, byte> guardValues = new();
-    private (Timeline Timeline, ushort[] StateRam)? reference;
+    private (Timeline Timeline, ushort[] StateRam, bool Silent)? reference;
     private bool guarding;
     private bool poking;
 
@@ -354,9 +354,9 @@ internal sealed class Prober
     }
 
     // ---- capture --------------------------------------------------------------
-    // The untriggered run, and the RAM that stays static in it: state a
-    // triggered sound owns, so a repeat of it marks a loop.
-    private (Timeline Timeline, ushort[] StateRam) Reference()
+    // The untriggered run, the RAM that stays static in it (state a triggered
+    // sound owns, so a repeat of it marks a loop) and whether it is silent.
+    private (Timeline Timeline, ushort[] StateRam, bool Silent) Reference()
     {
         if (reference is { } cached)
             return cached;
@@ -365,20 +365,22 @@ internal sealed class Prober
         var ram = Enumerable.Range(0, 0x10000).Select(a => (ushort)a).Where(m.IsWorkRam).ToArray();
         var first = ram.Select(m.Peek).ToArray();
         var changed = new bool[ram.Length];
-        var timeline = Isolated(() => Recorder.Record(m, s.ReferenceFrames, _ =>
+        var audible = false;
+        var timeline = Isolated(() => Recorder.Record(m, s.ReferenceFrames, f =>
         {
             for (var i = 0; i < ram.Length; i++)
                 changed[i] |= m.Peek(ram[i]) != first[i];
+            audible |= f >= 30 && m.Audible;
             return true;
         }));
-        reference = (timeline, ram.Where((_, i) => !changed[i]).ToArray());
+        reference = (timeline, ram.Where((_, i) => !changed[i]).ToArray(), !audible);
         return reference.Value;
     }
 
     // Records one request until its sound ends, loops or hits the time limit.
     public Sound Capture(ushort address, byte value)
     {
-        var (refTimeline, stateRam) = Reference();
+        var (refTimeline, stateRam, refSilent) = Reference();
         m.LoadState(baseState);
         var init = m.Chip.InitWrites(m.ApuShadow);
         Poke(address, value);
@@ -389,6 +391,7 @@ internal sealed class Prober
         var states = new Dictionary<(ulong, ulong), int>();
         var hashes = new List<ulong>();
         var lastActive = -1;
+        var lastAudible = -1;
         var end = "max";
         int? loopStart = null, loopFrames = null;
         (int Start, int Length, int Until)? pending = null;   // loop awaiting confirmation
@@ -399,6 +402,8 @@ internal sealed class Prober
             diffs.Add(diff);
             hashes.Add(timeline.FrameHash(f));
             active.Add((f > 0 ? active[f - 1] : 0) + (diff.Count > 0 ? 1 : 0));
+            if (refSilent && m.Audible)
+                lastAudible = f;
             if (diff.Count > 0)
                 lastActive = f;
             else if (lastActive < 0 && f >= 120)
@@ -406,7 +411,11 @@ internal sealed class Prober
                 end = "silent";
                 return false;
             }
-            else if (lastActive >= 0 && f - lastActive >= s.QuietFrames)
+            // Over silence, the last notes ring out after the last write (a
+            // Game Boy envelope fades on its own); a note that never fades is
+            // cut after a while.
+            else if (lastActive >= 0 && f - lastActive >= s.QuietFrames
+                     && (f - lastAudible >= s.QuietFrames || f - lastActive >= 4 * s.QuietFrames))
             {
                 end = "ended";
                 return false;
@@ -458,8 +467,13 @@ internal sealed class Prober
             _ => lastActive + 1,
         };
         var musical = frames >= s.MusicMinFrames && channels.Length >= 2;
+        if (end == "ended")
+            frames = Math.Max(frames, Math.Min(lastAudible, lastActive + 4 * s.QuietFrames) + 1);
+        // Over silence, a request that writes the chip but is never heard is
+        // garbage the driver half-accepted.
         var kind = end switch
         {
+            _ when refSilent && lastAudible < 0 => "none",
             "loop" or "max" => musical ? "music" : "sfx",
             "ended" => musical ? "jingle" : "sfx",
             _ => "none",

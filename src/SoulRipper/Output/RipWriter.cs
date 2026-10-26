@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
@@ -7,8 +8,8 @@ namespace SoulRipper.Output;
 // A written (or skipped) sound, as listed in sounds.json.
 internal sealed record RipEntry(Sound Sound, string? Name, string? File, bool Suspect, double Seconds, double? LoopSeconds);
 
-// Writes a discovery result: <kind>/NN - Name.vgm for every sound,
-// sounds.json and a draft profile.
+// Writes a discovery result: <kind>/NN - Name.vgz (or .vgm, uncompressed)
+// for every sound, sounds.json and a draft profile.
 internal static class RipWriter
 {
     private static readonly Dictionary<string, string> KindDirs = new() { ["music"] = "music", ["jingle"] = "jingles", ["sfx"] = "sfx" };
@@ -17,7 +18,7 @@ internal static class RipWriter
 
     // `known` lists, per request byte, the values a community rip requests.
     public static List<RipEntry> Write(RipResult rip, string outDir, IReadOnlyDictionary<string, string> names, bool keepSuspect,
-        IReadOnlyDictionary<ushort, HashSet<byte>>? known = null)
+        IReadOnlyDictionary<ushort, HashSet<byte>>? known = null, bool compress = true)
     {
         var sounds = rip.Sounds.Where(s => KindDirs.ContainsKey(s.Kind)).ToList();
         var suspects = Suspects.Find(sounds, known);
@@ -39,12 +40,15 @@ internal static class RipWriter
             var folder = KindDirs[s.Kind] + (suspect ? "/suspect" : "");
             var index = counters[folder] = counters.GetValueOrDefault(folder) + 1;
             var name = NameOf(s, names) ?? $"{KindLabels[s.Kind]} {index:00}";
-            var file = $"{folder}/{SafeFileName($"{index:00} - {name}")}.vgm";
+            var file = $"{folder}/{SafeFileName($"{index:00} - {name}")}.{(compress ? "vgz" : "vgm")}";
             var gd3 = new Gd3(name, rip.Game, SystemNames[rip.System], rip.Author, rip.Date,
                 $"Ripped by SoulRipper: request 0x{s.Address:X4} = 0x{s.Value:X2}");
             var path = Path.Combine(outDir, file);
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            File.WriteAllBytes(path, VgmWriter.Encode(rip.System, s.Init, s.Writes, s.Frames, s.LoopStart, gd3));
+            var vgm = VgmWriter.Encode(rip.System, s.Init, s.Writes, s.Frames, s.LoopStart, gd3);
+            using (var stream = File.Create(path))
+            using (Stream output = compress ? new GZipStream(stream, CompressionLevel.SmallestSize) : stream)
+                output.Write(vgm);
             entries.Add(new RipEntry(s, name, file, suspect, seconds, loopSeconds));
         }
 

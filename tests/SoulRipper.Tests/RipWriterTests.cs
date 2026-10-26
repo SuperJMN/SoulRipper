@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.IO.Compression;
 using SoulRipper.Output;
 
 namespace SoulRipper.Tests;
@@ -18,8 +19,8 @@ public sealed class RipWriterTests : IDisposable
             Rip(Sounds.Of(0xA468, 1, "music", frames: 600, loopStart: 100), Sounds.Of(0xA460, 5)),
             outDir, new Dictionary<string, string> { ["A460_05"] = "Coin" }, keepSuspect: false);
 
-        Assert.Equal(new[] { "music/01 - Music 01.vgm", "sfx/01 - Coin.vgm" }, entries.Select(e => e.File).Order());
-        Assert.True(File.Exists(Path.Combine(outDir, "sfx", "01 - Coin.vgm")));
+        Assert.Equal(new[] { "music/01 - Music 01.vgz", "sfx/01 - Coin.vgz" }, entries.Select(e => e.File).Order());
+        Assert.True(File.Exists(Path.Combine(outDir, "sfx", "01 - Coin.vgz")));
         Assert.True(File.Exists(Path.Combine(outDir, "profile.json")));
     }
 
@@ -38,12 +39,30 @@ public sealed class RipWriterTests : IDisposable
         RipWriter.Write(Rip(Sounds.Of(0xA468, 1, "music", frames: 600, loopStart: 100)),
             outDir, new Dictionary<string, string>(), keepSuspect: false);
 
-        var header = File.ReadAllBytes(Path.Combine(outDir, "music", "01 - Music 01.vgm")).AsSpan();
+        var header = Gunzip(Path.Combine(outDir, "music", "01 - Music 01.vgz")).AsSpan();
         var total = BinaryPrimitives.ReadInt32LittleEndian(header[0x18..]);
         var loopOffset = BinaryPrimitives.ReadInt32LittleEndian(header[0x1C..]);
         var loopSamples = BinaryPrimitives.ReadInt32LittleEndian(header[0x20..]);
         Assert.True(loopOffset > 0);
         Assert.Equal(500.0 / 600, (double)loopSamples / total, 2);
+    }
+
+    [Fact]
+    public void Uncompressed_output_writes_plain_vgm()
+    {
+        var entries = RipWriter.Write(Rip(Sounds.Of(0xA460, 5)), outDir, new Dictionary<string, string>(),
+            keepSuspect: false, compress: false);
+
+        var bytes = File.ReadAllBytes(Path.Combine(outDir, entries.Single().File!));
+        Assert.Equal("Vgm "u8.ToArray(), bytes[..4]);
+    }
+
+    private static byte[] Gunzip(string path)
+    {
+        using var input = new GZipStream(File.OpenRead(path), CompressionMode.Decompress);
+        using var output = new MemoryStream();
+        input.CopyTo(output);
+        return output.ToArray();
     }
 
     [Fact]

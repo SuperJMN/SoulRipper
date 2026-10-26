@@ -276,13 +276,16 @@ internal static class Program
         return (reach, idle);
     }
 
-    // Probing on a throwaway copy keeps the reach deterministic.
+    // Probing on a throwaway copy keeps the reach deterministic. Some drivers
+    // write the same registers every frame while silent (SMB1 keeps the APU
+    // off on its title screen), so only writes that change count.
     private static bool DriverActive(IMachine m)
     {
         var state = m.SaveState();
-        var writes = Recorder.Record(m, 60).Frames.Sum(f => f.Count);
+        var frames = Recorder.Record(m, 60).Frames;
         m.LoadState(state);
-        return writes > 0;
+        var first = frames[0].ToHashSet();
+        return frames.Any(f => !first.SetEquals(f));
     }
 
     private static void Log(string message) => Console.Error.WriteLine($"  {message}");

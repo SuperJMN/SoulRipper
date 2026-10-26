@@ -16,21 +16,17 @@ Dream Land (GB); Super Mario Bros. 1 and 3, Mega Man 2, Zelda (NES).
   drivers run twice in a frame). SML now rebases on `DFE8 = FF`.
 - Captures grouped by identical start (SMB3: 44 captures instead of 1272, 21 s).
 - Values a community rip never requests on its queue are marked suspect.
+- SMB1 and SML2 rip with no profile: a driver that writes the same
+  registers every frame (SMB1 keeps the APU off on its title screen) counts
+  as idle, so Start is pressed; the NES stack is page 1 at the real `S`
+  (a fixed `0x0100` hid `$00C0-$00FF`, where SMB1 keeps its effect queues).
+- Emulator libraries published to NuGet (`Zafiro.GameBoy.Debug.Emulator`,
+  `Zafiro.Nes.Debug.Emulator`); public repository; Fleet project.
 
-## 1. Release blockers
+## 1. Release
 
-1. **Emulator libraries on NuGet.** SuperJMN/Zafiro.GameBoy.Debug#29 and
-   SuperJMN/Zafiro.Nes.Debug#19 make `*.Emulator`, `*.Core` and `*.Symbols`
-   packable. Merge them, wait for Fleet to publish, then replace the
-   `ProjectReference`s to the sibling checkouts in
-   `src/SoulRipper/SoulRipper.csproj` with `PackageReference`s. Until then the
-   solution only builds next to those checkouts.
-2. **Fleet project** for SuperJMN/SoulRipper (branch `master`, tests on,
-   `NUGET_API_KEY`). Needs Fleet credentials.
-3. **Repository visibility.** The repository is private; the NuGet package
-   links to it.
-4. **First release tag** once the first version is on NuGet (see the Fleet
-   notes on GitVersion).
+1. **First release tag** once the first version is on NuGet (see the Fleet
+   notes on GitVersion), so later versions do not collide with it.
 
 ## 2. Quality of the rips
 
@@ -49,9 +45,19 @@ Dream Land (GB); Super Mario Bros. 1 and 3, Mega Man 2, Zelda (NES).
    queues: its requests go through a ring buffer, not a byte), SML2.
 4. **Suspect rules for garbage music.** Music that never loops or ends
    within the cap is likely garbage; consider marking it suspect.
-5. **NSF rips without playlists** (SMB3, Zelda): no track names. Look for
+5. **Cut-off tails on Game Boy.** A sound ends when the writes stop, but a
+   GB note keeps decaying through its envelope (`NRx2`), and some drivers
+   switch the chip off (`NR52 = 0`) once nothing is queued, which only
+   happens on the silenced base. SML2's coin (`A460 = 07`) is cut at 0.08 s
+   instead of ringing for 1.1 s. Extend the tail by the envelopes still
+   running and leave out a trailing master-off write.
+6. **Effect names.** Community rips name music only. Effects could be named
+   from the code that requests them (e.g. the request next to a BCD
+   increment of a counter), but that does not generalise; a curated name
+   database keyed by ROM CRC and request would.
+7. **NSF rips without playlists** (SMB3, Zelda): no track names. Look for
    NSFe sets (`tlbl` chunk) or other playlist sources.
-6. **Ring-buffer request queues** (Mega Man 2): requests written to a
+8. **Ring-buffer request queues** (Mega Man 2): requests written to a
    buffer by a game routine. Detect the routine that writes the buffer and
    call it, or poke buffer + index together.
 

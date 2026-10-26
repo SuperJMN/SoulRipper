@@ -22,7 +22,7 @@ internal sealed class NesMachine : IMachine
 
     public SoundChip Chip => SoundChip.Nes;
     public Action<ushort, byte, ushort>? Write { get; set; }
-    public ushort StackPointer => 0x0100;
+    public ushort StackPointer => (ushort)(0x0100 | NesCore.DebugReadRegisters().Sp);
     public Action? FrameEnded { get; set; }
     public byte[] ApuShadow { get; private set; } = new byte[SoundChip.Nes.Length];
 

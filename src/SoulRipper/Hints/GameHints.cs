@@ -14,7 +14,7 @@ namespace SoulRipper.Hints;
 internal sealed class GameHints
 {
     private const string DatBase = "https://raw.githubusercontent.com/libretro/libretro-database/master/metadat/no-intro/";
-    private const string UserAgent = "soul-ripper (https://github.com/SuperJMN/SoulRipper)";
+    private const string UserAgent = "soulripper (https://github.com/SuperJMN/SoulRipper)";
 
     private static readonly Dictionary<string, string[]> Dats = new()
     {
@@ -60,7 +60,7 @@ internal sealed class GameHints
             : OperatingSystem.IsWindows()
                 ? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
                 : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".cache"),
-        "soul-ripper");
+        "soulripper");
 
     // Hints for a ROM; empty when offline or nothing is found.
     public static GameHints Lookup(string rom, string system, Action<string> log)

@@ -2,7 +2,7 @@ namespace SoulRipper.Tests;
 
 public sealed class ProfileTests : IDisposable
 {
-    private readonly string path = Path.Combine(Path.GetTempPath(), $"soul-ripper-profile-{Guid.NewGuid():N}.json");
+    private readonly string path = Path.Combine(Path.GetTempPath(), $"soulripper-profile-{Guid.NewGuid():N}.json");
 
     public void Dispose() => File.Delete(path);
 

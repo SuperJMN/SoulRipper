@@ -42,7 +42,7 @@ internal sealed class RomFile : IDisposable
             throw new ArgumentException($"several ROMs in {path}; extract the one to rip: {string.Join(", ", roms.Select(e => e.Key))}");
 
         var name = IOPath.GetFileName(roms[0].Key!);
-        var temp = IOPath.Combine(IOPath.GetTempPath(), $"soul-ripper-{Guid.NewGuid():N}{IOPath.GetExtension(name)}");
+        var temp = IOPath.Combine(IOPath.GetTempPath(), $"soulripper-{Guid.NewGuid():N}{IOPath.GetExtension(name)}");
         using (var input = roms[0].OpenEntryStream())
         using (var output = File.Create(temp))
             input.CopyTo(output);

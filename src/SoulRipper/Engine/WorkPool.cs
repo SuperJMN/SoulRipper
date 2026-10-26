@@ -61,7 +61,7 @@ internal sealed class LocalPool(Prober prober) : IWorkPool
     }
 }
 
-// Pool of `soul-ripper worker` processes. Each one boots its own machine to the
+// Pool of `soulripper worker` processes. Each one boots its own machine to the
 // same reach state, so any of them can run any item; NES needs processes
 // because the AprNes core is static.
 internal sealed class ProcessPool : IWorkPool

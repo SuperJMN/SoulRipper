@@ -33,7 +33,7 @@ internal sealed class Options
         return new Options(positional, d);
     }
 
-    private static bool IsFlag(string key) => key is "offline" or "keep-suspect" or "no-rebase" or "help";
+    private static bool IsFlag(string key) => key is "offline" or "keep-suspect" or "no-rebase" or "vgm" or "help";
 
     public string Req(string key) =>
         values.TryGetValue(key, out var v) ? v : throw new ArgumentException($"missing --{key}");

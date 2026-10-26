@@ -30,7 +30,8 @@ soul-ripper "Super Mario Land (World).gb"
 The ROM can be a `.nes`, `.gb` or `.gbc` file, or a zip/7z holding one.
 Output goes to a folder named after the game:
 
-- `music/`, `jingles/`, `sfx/`: `NN - Name.vgm`, one per distinct sound.
+- `music/`, `jingles/`, `sfx/`: `NN - Name.vgz` (gzipped VGM; `--vgm` writes
+  them uncompressed), one per distinct sound.
   Doubtful captures (requests past the end of the game's sound table) are
   skipped, or written to a `suspect/` subfolder with `--keep-suspect`.
 - `sounds.json`: every sound with its request byte and value, length, loop

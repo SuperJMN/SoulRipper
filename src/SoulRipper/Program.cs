@@ -51,6 +51,7 @@ internal static class Program
               --boot N           frames to boot before probing (default 600)
               --max-seconds S    longest capture per sound (default 240)
               --keep-suspect     also write sounds past the game's valid IDs
+              --vgm              write uncompressed .vgm instead of .vgz
               --offline          do not look the game up online
               --jobs N           worker processes (default: cores - 1)
 
@@ -97,7 +98,7 @@ internal static class Program
             names[id] = name;
 
         var rip = new RipResult(game, rom.SystemId, fps, reach, sounds, profile.Author, profile.Date);
-        var entries = RipWriter.Write(rip, outDir, names, opt.Flag("keep-suspect"), hints.KnownRequests);
+        var entries = RipWriter.Write(rip, outDir, names, opt.Flag("keep-suspect"), hints.KnownRequests, compress: !opt.Flag("vgm"));
         PrintSummary(entries, outDir, sw.Elapsed);
         return 0;
     }

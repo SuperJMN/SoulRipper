@@ -1,6 +1,3 @@
-# Local FCEUX emulator (fetched via setup_fceux.sh, no root)
-/tools/
-
 # Generated output (derived from copyrighted ROMs)
 /out/
 *.vgm
@@ -11,18 +8,10 @@
 *.gb
 *.gbc
 *.zip
-
-# Emulator savestates
-*.sav
-*.state
-
-# Downloaded packages
-*.deb
+*.7z
 
 # .NET build output
 [Bb]in/
 [Oo]bj/
-
-# Python
-__pycache__/
-*.pyc
+/nupkg/
+/artifacts/

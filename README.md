@@ -1,128 +1,154 @@
-# SFX → VGM ripper (NES + Game Boy)
+# SoulRipper
 
-Automated extraction of **sound effects** from **NES** and **Game Boy** ROMs into
-per-effect **VGM** files. For each effect declared in a game *profile*, the ripper
-drives an emulator to capture the sound-chip register writes the effect produces,
-then encodes each capture as its own VGM.
+Rips the **music, jingles and sound effects** of **NES** and **Game Boy** ROMs
+into one **VGM** file each, with loop points for music. No per-game setup: it
+finds how the game asks its sound driver for sounds by itself, and names the
+tracks from community rips when it can find them online.
 
-Because the VGM stores the raw register writes, playback is **cycle-exact** on any
-compatible player (NSFPlay/SameBoy cores, foobar2000/Winamp + vgmstream, etc.).
+The VGMs store the raw sound-chip register writes, so playback is
+**cycle-exact** on any compatible player (foobar2000/Winamp + vgmstream,
+Benben, NSFPlay/SameBoy cores, etc.).
 
-| System | Engine | Isolation strategy | Trigger |
-|--------|--------|--------------------|---------|
-| NES | headless **FCEUX** + Lua | per-effect **savestate** from a silent state | RAM poke of the sound-queue byte |
-| Game Boy | **CoreBoy** (`gb/GbSweep`) | **differential capture** (run twice, subtract music) | RAM poke of the sound-request byte |
+## Install
 
-## Why profiles?
-ROMs have no standard "play SFX N" API (unlike music via NSF/GBS subsongs).
-Each game's sound engine triggers effects its own way — usually by writing an ID
-to a *sound request* RAM byte. A profile captures that game-specific knowledge:
-which RAM address to poke, the effect IDs, and how to reach a state where the
-effect plays.
+```bash
+dotnet tool install -g SoulRipper
+```
+
+Or run it without installing, with .NET 10's `dnx`:
+
+```bash
+dnx SoulRipper game.gb
+```
 
 ## Usage
+
 ```bash
-# NES
-./setup_fceux.sh                      # one-time: fetch a local, no-root FCEUX
-python3 ripper.py \
-    --rom /path/to/game.nes \
-    --profile profiles/smb3.json \
-    --out out/SMB3
-
-# Game Boy
-./setup_gb.sh                         # one-time: build gbsweep (needs .NET SDK +
-                                      # sibling GameboyMcp repo, see below)
-python3 ripper.py \
-    --rom /path/to/game.gb \
-    --profile profiles/sml.json \
-    --out out/SML
-
-# Super Mario Land 2 directly from a zipped ROM
-python3 ripper.py \
-    --rom "/mnt/store/Juegos/ROMs/Gameboy/Super Mario Land 2 - 6 Golden Coins (USA, Europe).zip" \
-    --profile profiles/sml2.json \
-    --out out/SML2
+soul-ripper "Super Mario Land (World).gb"
 ```
-Output: `out/<GAME>/NN_<Name>.vgm`, one per effect that produced audio.
-The system (NES vs GB) is auto-detected from the profile's `system` field.
-Effects that stayed silent are listed at the end.
-`--rom` may point to a plain ROM or to a `.zip` containing exactly one
-supported ROM (`.nes`, `.gb`, or `.gbc`).
 
-## Game Boy backend (`gb/GbSweep`)
-`gbsweep` is a small C# tool that drives the **CoreBoy**-based debug session from
-the [GameboyMcp](https://github.com/) repo (pure managed, no native deps). It is
-expected as a **sibling checkout** (`~/Repos/GameboyMcp` next to this repo);
-`setup_gb.sh` accepts an explicit path otherwise.
+The ROM can be a `.nes`, `.gb` or `.gbc` file, or a zip/7z holding one.
+Output goes to a folder named after the game:
 
-Because Game Boy games play music during gameplay, GB effects are isolated by
-**differential capture**: the sweeper reaches a deterministic state, records the
-APU writes for a music-only reference run, then re-reaches the same state and
-records again with the SFX request poked. Only writes the effect *changes* are
-kept — the byte-identical music cancels out, leaving the effect alone on its
-channel. See `profiles/sml.json` (Super Mario Land, sound requests via `$DFE0`).
-`profiles/sml2.json` covers Super Mario Land 2 by driving the engine's three
-SFX request queues: `$A460` (square/pulse), `$A470` (wave), and `$A478` (noise).
+- `music/`, `jingles/`, `sfx/`: `NN - Name.vgm`, one per distinct sound.
+  Doubtful captures (requests past the end of the game's sound table) are
+  skipped, or written to a `suspect/` subfolder with `--keep-suspect`.
+- `sounds.json`: every sound with its request byte and value, length, loop
+  and aliases (other values that play the same sound).
+- `profile.json`: a draft profile, to curate and pass back with `--profile`.
 
-## Profile format (`profiles/*.json`)
-```jsonc
-{
-  "name": "Super Mario Bros. 3",
-  "system": "NES / Famicom",
-  "author": "Koji Kondo",
-  "date": "1988",
-  "boot_frames": 181,        // frames to run to reach a clean/silent state
-  "max_frames": 240,         // capture cap per effect
-  "channel_enable": 31,      // value prepended to $4015 ($1F = all channels)
-  "sfx": [
-    { "name": "Player - Jump", "id": "Player_Jump",
-      "queue": 1265,          // 0x04F1  RAM byte to poke
-      "value": 1,             // 0x01    effect ID
-      "done_watch": 1249 }    // 0x04E1  nonzero while playing, 0 = finished
-  ]
-}
-```
-`profiles/smb3.json` was derived from the Southbird SMB3 disassembly
-(sound queues `$04F1–$04F7`, "currently playing" mirrors `$04E1–$04E7`).
+| Option | |
+|--------|---|
+| `--out DIR` | output folder (default: the game's name) |
+| `--profile P` | curated profile: how to reach a playable state, and sound names |
+| `--boot N` | frames to boot before probing (default 600) |
+| `--max-seconds S` | longest capture per sound (default 240) |
+| `--keep-suspect` | also write doubtful sounds |
+| `--offline` | do not look the game up online |
+| `--jobs N` | worker processes (default: cores - 1) |
+
+A run takes from under a minute to a few minutes, depending on the game.
 
 ## How it works
-1. `ripper.py` renders a Lua sweep script from the profile.
-2. FCEUX runs headless (`QT_QPA_PLATFORM=offscreen`, `--sound 0`), boots to a
-   silent frame, and snapshots a savestate.
-3. For each effect: load snapshot → poke `queue = value` → record every write to
-   `$4000–$4017` until `done_watch` returns to 0 (or `max_frames`).
-4. `vgm_writer.py` encodes each per-frame write list to VGM v1.61 (NES APU,
-   clock 1789772 Hz), prepending a `$4015` enable so the initially-disabled
-   VGM APU matches the running console.
+
+Games ask their sound driver for a sound by writing its ID into a RAM byte
+the driver polls. SoulRipper finds those bytes without knowing the game:
+
+1. **Analysis.** Run the game and note which code writes the sound chip (the
+   driver) and which RAM bytes that code reads: the candidates.
+2. **Sweep.** From a saved state, poke each candidate with a few values and
+   then all 256. A request byte makes the chip react and is *consumed*: the
+   driver clears it, unlike channel state, which keeps the poked value.
+3. **Silence.** If music is playing, find the driver's "stop" request and
+   start over from silence, so effects are recorded on their own. A stopper
+   only counts if the driver still answers afterwards: garbage values can
+   silence it by hanging it, and pause flags silence it for good.
+4. **Capture.** Record each request until its sound ends or loops. Values
+   whose first frames sound exactly alike are one sound (an alias table, or
+   the same garbage), so only one of them is captured. While capturing, the
+   game's own clock is frozen (RAM written by non-driver code is restored
+   every frame), so demo modes and timers do not interfere. Loops are
+   detected on the driver's state and confirmed on the register writes.
+5. **Classify.** Long multi-channel sounds that loop are music, ones that end
+   are jingles, the rest effects.
+
+The work runs in parallel on a pool of worker processes, each with its own
+emulator: [Zafiro.GameBoy.Debug](https://github.com/SuperJMN/Zafiro.GameBoy.Debug)
+(CoreBoy) and [Zafiro.Nes.Debug](https://github.com/SuperJMN/Zafiro.Nes.Debug) (AprNes).
+
+### Online hints
+
+Unless `--offline`, the ROM is identified by CRC32 in the No-Intro DATs
+([libretro-database](https://github.com/libretro/libretro-database)) and its
+NSF/GBS set is fetched from [joshw.info](https://joshw.info):
+
+- its playlists give **track names** ("World Music 1", "Game Over", ...);
+- playing the rip shows which RAM bytes its INIT stores the request in; those
+  are probed even if analysis missed them (e.g. SMB3's music queue `$04F5`);
+- each rip track is paired with the capture it requests or sounds like, and
+  the capture takes its name.
+
+Downloads are cached in `~/.cache/soul-ripper`.
+
+## Profiles
+
+A profile is optional knowledge about a game. Every field is optional:
+
+```jsonc
+{
+  "name": "Super Mario Land",
+  "author": "Hirokazu Tanaka",
+  "date": "1989",
+  "reach": {                       // how to get from power-on to a playable state
+    "boot": 240,
+    "presses": [ { "buttons": ["Start"], "hold": 8 } ],
+    "settle": 40
+  },
+  "music": [ { "name": "Overworld", "queue": "0xDFE8", "value": 7 } ],
+  "sfx":   [ { "name": "Jump",      "queue": "0xDFE0", "value": 1 } ]
+}
+```
+
+The entries name the sounds they request, and their queues are always
+probed. `profiles/` holds curated ones for Super Mario Land, Super Mario
+Land 2 and Super Mario Bros. 3; `profile.json` in every output is a draft to
+start from.
+
+## Advanced commands
+
+```bash
+soul-ripper discover game.gb --out report.json [--queues A460,A468] [--extra 04F5] [--no-rebase]
+soul-ripper bench game.gb [--frames N]          # emulation speed, savestate replay check
+soul-ripper access game.gb --addr A460,A470     # code that reads/writes those bytes
+```
+
+`discover` writes the raw result (driver, every probed byte, every capture);
+`--queues` probes only those bytes, `--extra` adds bytes to the search.
 
 ## Limitations
-- **Context-dependent effects.** Effects that only play in a specific game state
-  (some level/map sounds) may be silent when triggered from the boot state.
-  Fix: add a profile option to load an in-level savestate before sweeping.
-- **Sustained effects** (e.g. SMB3 "power ring") must be re-triggered every
-  frame; a single poke yields no lasting output. Currently reported as "no
-  audio".
-- **Music vs SFX.** Song/jingle queues are intentionally excluded.
 
-## Adding a new game
-1. Find the sound engine's trigger RAM byte(s) and effect IDs (disassembly,
-   datacrystal, or the discovery method below).
-2. Optionally find a "currently playing" RAM byte for clean end-detection;
-   otherwise rely on `max_frames`.
-3. Write `profiles/<game>.json` and run.
+- **Context-dependent sounds.** Sounds that only play in a given game state
+  may stay silent from the state the ROM boots into; a profile `reach` can
+  get the game there first.
+- **Sustained effects** that must be re-requested every frame yield only
+  their first frame.
+- **Event-triggered sounds** that have no request byte (the driver plays them
+  straight from game code) are not found.
 
-### Discovery (no disassembly)
-Log RAM writes alongside APU-register bursts during play and correlate: RAM
-bytes whose writes reliably precede APU channel activity are trigger
-candidates. Then sweep their values.
+## Build
 
-## Files
-- `ripper.py` — orchestrator: selects the backend by system, parses captures,
-  writes VGMs.
-- `vgm_writer.py` — reusable VGM encoder for NES APU **and** Game Boy DMG.
-- `gb/GbSweep/` — C# Game Boy sweeper (CoreBoy; `record` and `sweep`/diff modes).
-- `profiles/smb3.json` — Super Mario Bros. 3, NES (31 effects).
-- `profiles/sml.json` — Super Mario Land, Game Boy (11 square-channel effects).
-- `profiles/sml2.json` — Super Mario Land 2, Game Boy (57 engine SFX queue values).
-- `setup_fceux.sh` — fetch local FCEUX (no root).
-- `setup_gb.sh` — build the Game Boy sweeper.
+```bash
+dotnet build
+dotnet test
+dotnet run --project src/SoulRipper -- game.gb
+```
+
+Releases are published to NuGet by
+[DotnetDeployer](https://github.com/SuperJMN/DotnetDeployer) (`deployer.yaml`)
+on every merge to `master`.
+
+## License
+
+MIT. The packaged tool includes the AprNes NES core, which carries the
+WTFPL and GPL-3.0-or-later licenses (see Zafiro.Nes.Debug's third-party
+notices).

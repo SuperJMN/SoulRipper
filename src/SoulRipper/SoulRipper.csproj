@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>soul-ripper</AssemblyName>
+    <RootNamespace>SoulRipper</RootNamespace>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <TieredPGO>true</TieredPGO>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>soul-ripper</ToolCommandName>
+    <PackageId>SoulRipper</PackageId>
+    <Title>SoulRipper</Title>
+    <Description>Rips the music, jingles and sound effects of NES and Game Boy ROMs to VGM files, with no per-game setup: it finds the game's sound requests by itself and names the tracks from community rips.</Description>
+    <Authors>SuperJMN</Authors>
+    <Company>José Manuel Nieto (@SuperJMN)</Company>
+    <PackageTags>nes;gameboy;vgm;music;sound-effects;ripper;chiptune;emulator</PackageTags>
+    <PackageLicenseExpression>MIT AND WTFPL AND GPL-3.0-or-later</PackageLicenseExpression>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/SuperJMN/SoulRipper</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/SuperJMN/SoulRipper</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="" Visible="false" />
+    <None Include="..\..\THIRD-PARTY-NOTICES.md" Pack="true" PackagePath="" Visible="false" />
+    <InternalsVisibleTo Include="SoulRipper.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="SharpCompress" Version="0.50.7" />
+    <PackageReference Include="Zafiro.GameBoy.Debug.Emulator" Version="0.0.18" />
+    <PackageReference Include="Zafiro.Nes.Debug.Emulator" Version="0.0.13" />
+    <PackageReference Include="System.IO.Hashing" Version="10.0.14" />
+  </ItemGroup>
+
+</Project>

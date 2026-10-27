@@ -5,9 +5,13 @@ namespace SoulRipper;
 // Sound-chip writes grouped by frame, in bus order.
 internal sealed class Timeline
 {
+    private const int TailFrames = 60;   // about a second
+
     public List<List<(ushort Address, byte Value)>> Frames { get; } = new();
 
     public int Count => Frames.Count;
+
+    private (int Count, List<List<(ushort, byte)>> Frames)? tail;
 
     public ulong FrameHash(int frame)
     {
@@ -19,17 +23,34 @@ internal sealed class Timeline
 
     // Writes of `frame` that the reference did not make in its same frame
     // (multiset difference, order preserved). Concurrent music cancels out.
-    // Past its end the reference is taken to repeat its last frame, which is
-    // what a silenced driver keeps writing: otherwise a sound that outlasts it
-    // (SMB2's title music) never ends and loops on the idle writes.
+    // Past its end the reference is taken to keep writing as in its last
+    // second, which is what a silenced driver keeps doing: otherwise a sound
+    // that outlasts it (SMB2's title music) never ends and loops on the idle
+    // writes. Any frame of that second will do: SML's idle driver writes twice
+    // in one frame of 14, and against the last frame alone those second
+    // writes made Can-Can loop on silence.
     public List<(ushort Address, byte Value)> DiffFrame(int frame, Timeline reference)
     {
         var mine = Frames[frame];
         if (reference.Count == 0)
             return mine.ToList();
+        if (frame < reference.Count)
+            return Except(mine, reference.Frames[frame]);
 
+        List<(ushort, byte)>? best = null;
+        foreach (var idle in reference.Tail())
+        {
+            var diff = Except(mine, idle);
+            if (best == null || diff.Count < best.Count) best = diff;
+            if (best.Count == 0) break;
+        }
+        return best!;
+    }
+
+    private static List<(ushort, byte)> Except(List<(ushort Address, byte Value)> mine, List<(ushort Address, byte Value)> other)
+    {
         var pool = new Dictionary<(ushort, byte), int>();
-        foreach (var w in reference.Frames[Math.Min(frame, reference.Count - 1)])
+        foreach (var w in other)
             pool[w] = pool.GetValueOrDefault(w) + 1;
 
         var result = new List<(ushort, byte)>();
@@ -39,6 +60,18 @@ internal sealed class Timeline
             else result.Add(w);
         }
         return result;
+    }
+
+    // The distinct frames of the timeline's last second.
+    private List<List<(ushort, byte)>> Tail()
+    {
+        if (tail is { } cached && cached.Count == Count)
+            return cached.Frames;
+
+        var start = Math.Max(0, Count - TailFrames);
+        var frames = Enumerable.Range(start, Count - start).DistinctBy(FrameHash).Select(f => Frames[f]).ToList();
+        tail = (Count, frames);
+        return frames;
     }
 }
 

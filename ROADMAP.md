@@ -9,7 +9,7 @@ Dream Land (GB); Super Mario Bros. 1 and 3, Mega Man 2, Zelda (NES).
 - C# tool (`soulripper`, PackageId `SoulRipper.Tool`) replacing the Python
   scripts, FCEUX and `gbsweep`: discovery engine, worker pool, NSF/GBS
   players, online hints (No-Intro + joshw.info), VGM writer, output folders,
-  draft profiles; 46 unit tests.
+  draft profiles; 48 unit tests.
 - Silencing the base state: request stoppers (`$FF` first), validated so
   that garbage values that hang or reset the game and pause flags are
   rejected; driver-RAM reset as a fallback; set-based silence check (some
@@ -40,6 +40,13 @@ Dream Land (GB); Super Mario Bros. 1 and 3, Mega Man 2, Zelda (NES).
   jingle instead of music with a silent one-frame loop. SMB2's 8 files
   that played nothing are DMC-only effects (queue `$0601`); with the DMC
   samples above, all 33 of its files are audible.
+- Past the reference, a capture is compared with any frame of the
+  reference's last second, not only its last frame: SML's idle driver
+  writes `NR51` twice in one frame of 14, and those second writes kept
+  Invincible (Can-Can) and Princess Daisy going as music with a silent
+  0.23 s loop. They are now jingles that end (16.0 s and 28.0 s; sound
+  stops at 15.9 s and 27.7 s); every other SML, SML2 and Tetris file is
+  unchanged.
 - Emulator libraries published to NuGet (`Zafiro.GameBoy.Debug.Emulator`,
   `Zafiro.Nes.Debug.Emulator`); public repository; Fleet project; first
   release (0.1.0, tagged).

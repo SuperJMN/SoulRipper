@@ -77,6 +77,9 @@ internal sealed class GameBoyMachine : IMachine
         var s = (State)state;
         s.Graph.Restore();
         ApuShadow = (byte[])s.Shadow.Clone();
+        // Output of a frame cut short (a crashed experiment) must not count in
+        // the first frame from the loaded state.
+        meter.Swing();
     }
 
     public byte Peek(ushort address)

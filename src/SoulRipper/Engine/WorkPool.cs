@@ -50,11 +50,16 @@ internal sealed class LocalPool(Prober prober) : IWorkPool
         var results = new List<JsonNode?>();
         for (var i = 0; i < items.Count; i++)
         {
-            results.Add(ProberOps.Execute(prober, op, items[i]));
+            results.Add(Wired(ProberOps.Execute(prober, op, Wired(items[i]))));
             done?.Invoke(i, results[i]);
         }
         return results;
     }
+
+    // Items and results go through JSON text as they do to and from a worker,
+    // so both pools decode the same nodes: one built from a ushort does not
+    // cast to int until it is parsed.
+    private static JsonNode? Wired(JsonNode? node) => node is null ? null : JsonNode.Parse(node.ToJsonString());
 
     public void Dispose()
     {

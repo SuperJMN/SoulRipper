@@ -437,68 +437,76 @@ internal sealed class Prober
         int? loopStart = null, loopFrames = null;
         (int Start, int Length, int Until)? pending = null;   // loop awaiting confirmation
 
-        Isolated(() => Recorder.Extend(m, timeline, s.MaxFrames, f =>
+        // A request that crashes the machine must not leave the sample observer
+        // chained for the next capture of this prober.
+        try
         {
-            var diff = timeline.DiffFrame(f, refTimeline);
-            diffs.Add(diff);
-            hashes.Add(timeline.FrameHash(f));
-            active.Add((f > 0 ? active[f - 1] : 0) + (diff.Count > 0 ? 1 : 0));
-            if (refSilent && m.Audible)
-                lastAudible = f;
-            if (diff.Count > 0)
-                lastActive = f;
-            else if (lastActive < 0 && f >= 120)
+            Isolated(() => Recorder.Extend(m, timeline, s.MaxFrames, f =>
             {
-                end = "silent";
-                return false;
-            }
-            // Over silence, the last notes ring out after the last write (a
-            // Game Boy envelope fades on its own); a note that never fades is
-            // cut after a while.
-            else if (lastActive >= 0 && f - lastActive >= s.QuietFrames
-                     && (f - lastAudible >= s.QuietFrames || f - lastActive >= 4 * s.QuietFrames))
-            {
-                end = "ended";
-                return false;
-            }
-
-            // Once the sound's state repeats, so should its writes: a repeat is
-            // confirmed by the writes matching one period back for a while.
-            if (pending is var (ls, ll, until))
-            {
-                if (hashes[f] != hashes[f - ll])
-                    pending = null;
-                else if (f >= until)
+                var diff = timeline.DiffFrame(f, refTimeline);
+                diffs.Add(diff);
+                hashes.Add(timeline.FrameHash(f));
+                active.Add((f > 0 ? active[f - 1] : 0) + (diff.Count > 0 ? 1 : 0));
+                if (refSilent && m.Audible)
+                    lastAudible = f;
+                if (diff.Count > 0)
+                    lastActive = f;
+                else if (lastActive < 0 && f >= 120)
                 {
-                    loopStart = ls;
-                    loopFrames = ll;
+                    end = "silent";
+                    return false;
+                }
+                // Over silence, the last notes ring out after the last write (a
+                // Game Boy envelope fades on its own); a note that never fades is
+                // cut after a while.
+                else if (lastActive >= 0 && f - lastActive >= s.QuietFrames
+                         && (f - lastAudible >= s.QuietFrames || f - lastActive >= 4 * s.QuietFrames))
+                {
+                    end = "ended";
+                    return false;
+                }
+
+                // Once the sound's state repeats, so should its writes: a repeat is
+                // confirmed by the writes matching one period back for a while.
+                if (pending is var (ls, ll, until))
+                {
+                    if (hashes[f] != hashes[f - ll])
+                        pending = null;
+                    else if (f >= until)
+                    {
+                        loopStart = ls;
+                        loopFrames = ll;
+                        end = "loop";
+                        return false;
+                    }
+                }
+                else if (stateRam.Length > 0)
+                {
+                    var key = SoundState(stateRam);
+                    if (!states.TryAdd(key, f) && active[f] - active[states[key]] > 0)
+                    {
+                        var length = f - states[key];
+                        pending = (states[key] + 1, length, f + Math.Min(Math.Max(length, 120), 600));
+                        states[key] = f;
+                    }
+                }
+
+                // Fallback for drivers whose state never repeats exactly.
+                if (pending == null && f >= 720 && f % 240 == 0 && FindPeriod(hashes, 120) is var (ps, pl)
+                    && active[ps + pl - 1] - (ps > 0 ? active[ps - 1] : 0) > 0)
+                {
+                    loopStart = ps;
+                    loopFrames = pl;
                     end = "loop";
                     return false;
                 }
-            }
-            else if (stateRam.Length > 0)
-            {
-                var key = SoundState(stateRam);
-                if (!states.TryAdd(key, f) && active[f] - active[states[key]] > 0)
-                {
-                    var length = f - states[key];
-                    pending = (states[key] + 1, length, f + Math.Min(Math.Max(length, 120), 600));
-                    states[key] = f;
-                }
-            }
-
-            // Fallback for drivers whose state never repeats exactly.
-            if (pending == null && f >= 720 && f % 240 == 0 && FindPeriod(hashes, 120) is var (ps, pl)
-                && active[ps + pl - 1] - (ps > 0 ? active[ps - 1] : 0) > 0)
-            {
-                loopStart = ps;
-                loopFrames = pl;
-                end = "loop";
-                return false;
-            }
-            return true;
-        }));
-        m.Write = observer;
+                return true;
+            }));
+        }
+        finally
+        {
+            m.Write = observer;
+        }
 
         var channels = diffs.SelectMany(d => d).Select(w => m.Chip.ChannelOf(w.Address))
             .Where(c => c >= 0).Distinct().Order().ToArray();

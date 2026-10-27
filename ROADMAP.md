@@ -9,7 +9,7 @@ Dream Land (GB); Super Mario Bros. 1 and 3, Mega Man 2, Zelda (NES).
 - C# tool (`soulripper`, PackageId `SoulRipper.Tool`) replacing the Python
   scripts, FCEUX and `gbsweep`: discovery engine, worker pool, NSF/GBS
   players, online hints (No-Intro + joshw.info), VGM writer, output folders,
-  draft profiles; 48 unit tests.
+  draft profiles; 53 unit tests.
 - Silencing the base state: request stoppers (`$FF` first), validated so
   that garbage values that hang or reset the game and pause flags are
   rejected; driver-RAM reset as a fallback; set-based silence check (some
@@ -47,6 +47,17 @@ Dream Land (GB); Super Mario Bros. 1 and 3, Mega Man 2, Zelda (NES).
   0.23 s loop. They are now jingles that end (16.0 s and 28.0 s; sound
   stops at 15.9 s and 27.7 s); every other SML, SML2 and Tetris file is
   unchanged.
+- Deterministic captures: AprNes' savestate leaves out the APU channels
+  (timers, volumes, envelopes, sweeps, length counters live in unmanaged
+  arrays), so a loaded state kept playing what the previous experiment of
+  that process left sounding; `NesMachine` now saves them itself. Both
+  machines also drop the audio of a frame cut short by a crash when they
+  load a state, and a crashed capture no longer leaves its sample observer
+  chained. Before, SMB2 gave an extra 0.02 s effect (`0603_80`) in one of
+  three rips and SML a 0.02 s `DFE8_D8` right after the crashing `DFE8_D7`;
+  now repeated rips of SMB2, SMB3 and SML, and SMB2 with `--jobs 1`, give
+  identical `sounds.json` and byte-identical files. `--jobs 1` works again:
+  its items now go through JSON text as they do to workers.
 - Emulator libraries published to NuGet (`Zafiro.GameBoy.Debug.Emulator`,
   `Zafiro.Nes.Debug.Emulator`); public repository; Fleet project; first
   release (0.1.0, tagged).

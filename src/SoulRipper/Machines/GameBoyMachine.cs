@@ -77,6 +77,9 @@ internal sealed class GameBoyMachine : IMachine
         var s = (State)state;
         s.Graph.Restore();
         ApuShadow = (byte[])s.Shadow.Clone();
+        // Output of a frame cut short (a crashed experiment) must not count in
+        // the first frame from the loaded state.
+        meter.Reset();
     }
 
     public byte Peek(ushort address)
@@ -159,8 +162,10 @@ internal sealed class GameBoyMachine : IMachine
         public int Swing()
         {
             var swing = max >= min ? max - min : 0;
-            (min, max) = (int.MaxValue, int.MinValue);
+            Reset();
             return swing;
         }
+
+        public void Reset() => (min, max) = (int.MaxValue, int.MinValue);
     }
 }

@@ -13,6 +13,7 @@ internal static class Playlists
 
     // Sets have one m3u for the whole rip ("# @TITLE" header, plain titles) and
     // one per track ("Title - Composer - Game - (c) Date"); the former wins.
+    // Tracks are numbered from 0, as the rip's players number them.
     public static List<PlaylistTrack> Parse(string folder)
     {
         var texts = Directory.EnumerateFiles(folder, "*", SearchOption.TopDirectoryOnly)
@@ -23,16 +24,18 @@ internal static class Playlists
             .ToList();
 
         var tracks = new SortedDictionary<int, PlaylistTrack>();
+        var nsf = false;
         foreach (var text in texts)
         {
             var whole = text.Contains("@TITLE");
             foreach (var line in text.Split('\n'))
             {
-                var m = Regex.Match(line.Trim(), @"^[^:]*::(?:NSF|NSFE|GBS),(\d+),(.*)");
+                var m = Regex.Match(line.Trim(), @"^[^:]*::(NSF|NSFE|GBS),(\d+),(.*)");
                 if (!m.Success) continue;
-                var track = int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
+                nsf |= m.Groups[1].Value != "GBS";
+                var track = int.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture);
                 // the title may contain commas; length, loop and fade come last
-                var fields = m.Groups[2].Value.Split(',');
+                var fields = m.Groups[3].Value.Split(',');
                 if (tracks.ContainsKey(track) || fields.Length < 4) continue;
                 var title = string.Join(",", fields[..^3]).Trim();
                 if (!whole && CountOf(title, " - ") >= 3)
@@ -40,7 +43,12 @@ internal static class Playlists
                 tracks[track] = new PlaylistTrack(track, title, Seconds(fields[^3]), Seconds(fields[^1]) > 0);
             }
         }
-        return tracks.Values.ToList();
+
+        // NSF playlists count from 1, like the NSF header's starting song (SMB2's
+        // "1,Title Screen" is its first track), and GBS ones from 0; a set that
+        // lists a track 0 counts from 0 whatever the format.
+        var shift = nsf && !tracks.ContainsKey(0) ? 1 : 0;
+        return tracks.Values.Select(t => t with { Track = t.Track - shift }).ToList();
     }
 
     // "1:02.5" -> 62.5; unreadable -> 0.

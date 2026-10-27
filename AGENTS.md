@@ -17,7 +17,7 @@ dotnet run --project src/SoulRipper -- bench game.gb    # emulation speed + save
 dotnet run --project src/SoulRipper -- access game.gb --addr DFE0   # code that reads/writes bytes
 ```
 
-- Tests (xUnit) are pure unit tests over hint parsing, pairing, suspects, profiles and output; they need no ROMs. `tests/SoulRipper.Tests/Sounds.cs` builds `Sound` fixtures and `FakeMachine` runs the prober without an emulator. `NesMachineTests` runs AprNes on a few bytes of NROM built in code; the core is static, so keep every NES test in that one class.
+- Tests (xUnit) are pure unit tests over hint parsing, pairing, suspects, profiles and output; they need no ROMs. `tests/SoulRipper.Tests/Sounds.cs` builds `Sound` fixtures and `FakeMachine` runs the prober without an emulator. `NesMachineTests` runs AprNes on a few bytes of NROM built in code; the core is static, so keep every NES test in that one class. `GameBoyMachineTests` does the same on CoreBoy, through a temporary file because CoreBoy only loads cartridges from disk.
 - Checking the engine itself means running the tool on a real ROM. ROMs and outputs are git-ignored (copyrighted data); never commit them. `--offline` avoids network lookups; `--jobs 1` runs everything in-process (easier to debug than the worker pool).
 - Do not rebuild while a rip is running: the worker processes start from the built executable, so a rebuild mid-run can break or skew it.
 - Every merge to `master` is a release: DotnetDeployer.Fleet (`deployer.yaml`, GitVersion) packs and pushes to NuGet. The release gate is `dotnet test SoulRipper.slnx -c Release --nologo -m:1`; run exactly that before merging.

@@ -38,6 +38,7 @@
   <ItemGroup>
     <PackageReference Include="SharpCompress" Version="0.50.7" />
     <PackageReference Include="Zafiro.GameBoy.Debug.Emulator" Version="0.0.18" />
+    <!-- NesMachine saves AprNes' APU arrays by size: check them on an update. -->
     <PackageReference Include="Zafiro.Nes.Debug.Emulator" Version="0.0.13" />
     <PackageReference Include="System.IO.Hashing" Version="10.0.14" />
   </ItemGroup>

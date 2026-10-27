@@ -12,20 +12,34 @@ internal sealed class NesMachine : IMachine
         ["up"] = 4, ["down"] = 5, ["left"] = 6, ["right"] = 7,
     };
 
+    // The APU array sizes below are what initAPU (APU.cs) allocates in this
+    // version of the core. A pointer carries no length, so a resized array
+    // would be copied out of range without a word: check them before moving
+    // to another version (the NES tests fail until then).
+    private static readonly Version ApuCheckedOn = new(0, 0, 13, 0);
+
     // AprNes keeps the APU channels (timers, duty, volume, envelopes, sweeps,
     // length counters) in unmanaged arrays its savestate leaves out, so a loaded
     // state went on playing whatever the previous experiment left sounding and
-    // a capture depended on what the same process ran before it (SMB2's 0604_20
-    // lasted 0.90 s or 2.11 s). The machine saves them itself.
-    private static readonly (FieldInfo Field, int Bytes)[] ApuArrays = new (string Name, int Bytes)[]
+    // a capture depended on what the same process ran before it (SMB2 gave a
+    // 0.02 s 0603_80 in one rip of three). The machine saves them itself.
+    private static readonly (FieldInfo Field, int Bytes)[] ApuArrays = ApuArraysOf(new (string, int)[]
     {
         ("_pulseTimer", 8), ("_pulsePeriod", 8), ("_pulseSeq", 8), ("_pulseDuty", 8), ("_pulseOut", 8),
         ("volume", 16), ("lengthctr", 16), ("lenCtrEnable", 4), ("apuRegister", 16),
         ("envelopeValue", 16), ("envelopeCounter", 16), ("envelopePos", 16), ("envConstVolume", 4), ("envelopeStartFlag", 4),
         ("sweepenable", 2), ("sweepnegate", 2), ("sweepsilence", 2), ("sweepreload", 2),
         ("sweepperiod", 8), ("sweepshift", 8), ("sweeppos", 8),
-    }.Select(x => (typeof(NesCore).GetField(x.Name, BindingFlags.Static | BindingFlags.NonPublic)
-                   ?? throw new MissingFieldException(nameof(NesCore), x.Name), x.Bytes)).ToArray();
+    });
+
+    private static (FieldInfo, int)[] ApuArraysOf((string Name, int Bytes)[] arrays)
+    {
+        var core = typeof(NesCore).Assembly.GetName().Version;
+        if (core != ApuCheckedOn)
+            throw new NotSupportedException($"AprNes {core}: check the APU array sizes NesMachine saves (checked on {ApuCheckedOn})");
+        return arrays.Select(x => (typeof(NesCore).GetField(x.Name, BindingFlags.Static | BindingFlags.NonPublic)
+                                   ?? throw new MissingFieldException(nameof(NesCore), x.Name), x.Bytes)).ToArray();
+    }
 
     private Action<ushort, ushort>? read;
     private int min = int.MaxValue, max = int.MinValue;

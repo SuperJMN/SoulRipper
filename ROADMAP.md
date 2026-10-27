@@ -9,7 +9,7 @@ Dream Land (GB); Super Mario Bros. 1 and 3, Mega Man 2, Zelda (NES).
 - C# tool (`soulripper`, PackageId `SoulRipper.Tool`) replacing the Python
   scripts, FCEUX and `gbsweep`: discovery engine, worker pool, NSF/GBS
   players, online hints (No-Intro + joshw.info), VGM writer, output folders,
-  draft profiles; 52 unit tests.
+  draft profiles; 53 unit tests.
 - Silencing the base state: request stoppers (`$FF` first), validated so
   that garbage values that hang or reset the game and pause flags are
   rejected; driver-RAM reset as a fallback; set-based silence check (some

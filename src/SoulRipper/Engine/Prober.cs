@@ -128,23 +128,22 @@ internal sealed class Prober
         int minSp = 0xFFFF, maxSp = 0;
 
         m.LoadState(baseState);
-        m.Write = (a, _, pc) =>
+        Observed((a, _, pc) =>
         {
             if (m.Chip.Owns(a)) pcs.Add(pc);
-        };
-        m.Read = (a, pc) =>
+        }, (a, pc) =>
         {
             // Skip instruction fetches of code running from RAM.
             if (m.IsWorkRam(a) && (a < pc || a > pc + 3)) Add(readers, a, pc);
-        };
-        for (var f = 0; f < s.AnalysisFrames; f++)
+        }, () =>
         {
-            m.RunFrames(1);
-            minSp = Math.Min(minSp, m.StackPointer);
-            maxSp = Math.Max(maxSp, m.StackPointer);
-        }
-        m.Read = null;
-        m.Write = OnWrite;
+            for (var f = 0; f < s.AnalysisFrames; f++)
+            {
+                m.RunFrames(1);
+                minSp = Math.Min(minSp, m.StackPointer);
+                maxSp = Math.Max(maxSp, m.StackPointer);
+            }
+        });
 
         ctx = ctx with { ApuPcs = pcs.Order().ToArray(), MinSp = minSp, MaxSp = maxSp };
         var candidates = readers
@@ -252,11 +251,7 @@ internal sealed class Prober
                 touched.Add(a);
         }
         m.LoadState(baseState);
-        m.Write = (a, _, pc) => Touch(a, pc);
-        m.Read = Touch;
-        m.RunFrames(120);
-        m.Read = null;
-        m.Write = OnWrite;
+        Observed((a, _, pc) => Touch(a, pc), Touch, () => m.RunFrames(120));
         m.LoadState(baseState);
         return touched.Order().ToList();
     }
@@ -300,12 +295,10 @@ internal sealed class Prober
     {
         var gameOwned = new HashSet<ushort>();
         m.LoadState(baseState);
-        m.Write = (a, _, pc) =>
+        Observed((a, _, pc) =>
         {
             if (m.IsWorkRam(a) && !InDriver(pc) && OffStack(a) && !guarded.Contains(a)) gameOwned.Add(a);
-        };
-        Isolated(() => m.RunFrames(300));
-        m.Write = OnWrite;
+        }, null, () => Isolated(() => m.RunFrames(300)));
 
         m.LoadState(baseState);
         return gameOwned.Order().ToDictionary(a => a, m.Peek);
@@ -329,6 +322,24 @@ internal sealed class Prober
     }
 
     private void Isolated(Action action) => Isolated(() => { action(); return 0; });
+
+    // Runs an experiment that watches the bus itself. The prober's own
+    // observer is back afterwards even if the game crashes, so the experiment
+    // does not go on watching the next one.
+    private void Observed(Action<ushort, byte, ushort> write, Action<ushort, ushort>? read, Action action)
+    {
+        m.Write = write;
+        m.Read = read;
+        try
+        {
+            action();
+        }
+        finally
+        {
+            m.Read = null;
+            m.Write = OnWrite;
+        }
+    }
 
     private void Poke(ushort address, byte value)
     {

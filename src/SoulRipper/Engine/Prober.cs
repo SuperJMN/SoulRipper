@@ -37,7 +37,8 @@ internal sealed record AddressReport(ushort Address, byte BaseValue, List<Respon
 
 internal sealed record Sound(
     ushort Address, byte Value, string Kind, string End, int Frames, int? LoopStart, int? LoopFrames,
-    int[] Channels, ulong Hash, List<(ushort Address, byte Value)> Init, List<(int Frame, ushort Address, byte Value)> Writes)
+    int[] Channels, ulong Hash, List<(ushort Address, byte Value)> Init, List<(int Frame, ushort Address, byte Value)> Writes,
+    List<(int Frame, ushort Address, byte[] Data)>? Samples = null)
 {
     public string Id => $"{Address:X4}_{Value:X2}";
     public List<string> Aliases { get; } = new();
@@ -386,6 +387,26 @@ internal sealed class Prober
         Poke(address, value);
 
         var timeline = new Timeline();
+
+        // DMC samples play from cartridge memory, which a VGM player lacks:
+        // keep the bytes each sample start points at, as banked at that moment.
+        var samples = new List<(int Frame, ushort Address, byte[] Data)>();
+        var played = new Dictionary<ushort, byte[]>();
+        var observer = m.Write;
+        m.Write = (a, v, pc) =>
+        {
+            observer?.Invoke(a, v, pc);
+            if (m.Chip.SampleStart(a, v, m.ApuShadow) is not { } sample)
+                return;
+            foreach (var (start, data) in SampleBlocks(sample.Address, sample.Length))
+            {
+                if (played.TryGetValue(start, out var known) && known.AsSpan().SequenceEqual(data))
+                    continue;
+                played[start] = data;
+                samples.Add((timeline.Count - 1, start, data));
+            }
+        };
+
         var diffs = new List<List<(ushort Address, byte Value)>>();
         var active = new List<int>();             // running count of frames with new writes
         var states = new Dictionary<(ulong, ulong), int>();
@@ -457,6 +478,7 @@ internal sealed class Prober
             }
             return true;
         }));
+        m.Write = observer;
 
         var channels = diffs.SelectMany(d => d).Select(w => m.Chip.ChannelOf(w.Address))
             .Where(c => c >= 0).Distinct().Order().ToArray();
@@ -490,8 +512,21 @@ internal sealed class Prober
         foreach (var (f, a, v) in writes)
             hash = (hash ^ ((ulong)f << 24 | (ulong)a << 8 | v)) * 1099511628211UL;
 
-        return new Sound(address, value, kind, end, frames, loopStart, loopFrames, channels, hash, init, writes);
+        return new Sound(address, value, kind, end, frames, loopStart, loopFrames, channels, hash, init, writes,
+            samples.Where(s => s.Frame < frames).ToList());
     }
+
+    // The memory a sample plays; past $FFFF the DMC wraps to $8000.
+    private IEnumerable<(ushort Address, byte[] Data)> SampleBlocks(ushort start, int length)
+    {
+        var first = Math.Min(length, 0x10000 - start);
+        yield return (start, Read(start, first));
+        if (first < length)
+            yield return (0x8000, Read(0x8000, length - first));
+    }
+
+    private byte[] Read(ushort start, int length) =>
+        Enumerable.Range(0, length).Select(i => m.Peek((ushort)(start + i))).ToArray();
 
     private (ulong, ulong) SoundState(ushort[] stateRam)
     {

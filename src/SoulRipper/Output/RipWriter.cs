@@ -45,7 +45,7 @@ internal static class RipWriter
                 $"Ripped by SoulRipper: request 0x{s.Address:X4} = 0x{s.Value:X2}");
             var path = Path.Combine(outDir, file);
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            var vgm = VgmWriter.Encode(rip.System, s.Init, s.Writes, s.Frames, s.LoopStart, gd3);
+            var vgm = VgmWriter.Encode(rip.System, s.Init, s.Writes, s.Frames, s.LoopStart, gd3, samples: s.Samples);
             using (var stream = File.Create(path))
             using (Stream output = compress ? new GZipStream(stream, CompressionLevel.SmallestSize) : stream)
                 output.Write(vgm);

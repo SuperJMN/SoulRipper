@@ -8,6 +8,7 @@ internal sealed record Gd3(string Track, string Game, string System, string Auth
 
 // Encodes per-frame sound-chip register writes as VGM 1.61, for the NES APU
 // (command 0xB4, clock at 0x84) and the Game Boy DMG (command 0xB3, clock at 0x80).
+// NES DMC samples go in as APU RAM data blocks (type 0xC2) before their frame.
 internal static class VgmWriter
 {
     public const int SampleRate = 44100;
@@ -22,10 +23,12 @@ internal static class VgmWriter
     // `loopStart`, frames loopStart..frames-1 loop forever; otherwise the chip
     // is silenced and a short tail appended. Returns the length in samples.
     public static byte[] Encode(string system, IEnumerable<(ushort Address, byte Value)> init,
-        IReadOnlyList<(int Frame, ushort Address, byte Value)> writes, int frames, int? loopStart, Gd3 gd3, int tailFrames = 3)
+        IReadOnlyList<(int Frame, ushort Address, byte Value)> writes, int frames, int? loopStart, Gd3 gd3, int tailFrames = 3,
+        IReadOnlyList<(int Frame, ushort Address, byte[] Data)>? samples = null)
     {
         var chip = system == "gb" ? GameBoy : Nes;
         var byFrame = writes.ToLookup(w => w.Frame);
+        var samplesByFrame = (samples ?? Array.Empty<(int, ushort, byte[])>()).ToLookup(b => b.Frame);
         var data = new List<byte>();
         var totalSamples = 0;
         var fraction = 0.0;
@@ -33,6 +36,14 @@ internal static class VgmWriter
 
         void Register(ushort address, byte value) =>
             data.AddRange(new[] { chip.Command, (byte)(address - chip.RegisterBase), value });
+
+        void DataBlock(ushort address, byte[] bytes)
+        {
+            data.AddRange(new byte[] { 0x67, 0x66, 0xC2 });
+            data.AddRange(BitConverter.GetBytes(bytes.Length + 2));
+            data.AddRange(new[] { (byte)address, (byte)(address >> 8) });
+            data.AddRange(bytes);
+        }
 
         void FrameWait()
         {
@@ -52,6 +63,8 @@ internal static class VgmWriter
         {
             if (frame == loopStart)
                 (loopOffset, loopSamples) = (data.Count, totalSamples);
+            foreach (var (_, address, bytes) in samplesByFrame[frame])
+                DataBlock(address, bytes);
             foreach (var w in byFrame[frame])
                 Register(w.Address, w.Value);
             FrameWait();

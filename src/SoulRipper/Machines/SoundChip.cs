@@ -23,7 +23,12 @@ internal sealed class SoundChip
         // $4014 is OAM DMA and $4016 the controller strobe: not sound.
         isRegister: a => a is >= 0x4000 and <= 0x4013 or 0x4015 or 0x4017,
         // Channel enable first; the frame counter mode affects envelopes.
-        initFirst: new ushort[] { 0x4015, 0x4017 });
+        initFirst: new ushort[] { 0x4015, 0x4017 },
+        // Setting the DMC bit of $4015 plays the sample at $C000 + 64 * $4012,
+        // 16 * $4013 + 1 bytes long, from cartridge memory.
+        sampleStart: (a, v, shadow) => a == 0x4015 && (v & 0x10) != 0
+            ? ((ushort)(0xC000 + shadow[0x12] * 64), shadow[0x13] * 16 + 1)
+            : null);
 
     public static readonly SoundChip GameBoy = new(
         name: "gb",
@@ -44,15 +49,17 @@ internal sealed class SoundChip
         isTrigger: a => a is 0xFF14 or 0xFF19 or 0xFF1E or 0xFF23,
         isRegister: a => a is >= 0xFF10 and <= 0xFF26 or >= 0xFF30 and <= 0xFF3F,
         // Power must come first: NR52=0 clears every other register.
-        initFirst: new ushort[] { 0xFF26, 0xFF24, 0xFF25 });
+        initFirst: new ushort[] { 0xFF26, 0xFF24, 0xFF25 },
+        sampleStart: (_, _, _) => null);
 
     private readonly Func<ushort, int> channelOf;
     private readonly Func<ushort, bool> isTrigger;
     private readonly Func<ushort, bool> isRegister;
+    private readonly Func<ushort, byte, byte[], (ushort Address, int Length)?> sampleStart;
 
     private SoundChip(string name, ushort baseAddress, int length, double fps,
         Func<ushort, int> channelOf, Func<ushort, bool> isTrigger, Func<ushort, bool> isRegister,
-        ushort[] initFirst)
+        ushort[] initFirst, Func<ushort, byte, byte[], (ushort Address, int Length)?> sampleStart)
     {
         Name = name;
         BaseAddress = baseAddress;
@@ -61,6 +68,7 @@ internal sealed class SoundChip
         this.channelOf = channelOf;
         this.isTrigger = isTrigger;
         this.isRegister = isRegister;
+        this.sampleStart = sampleStart;
         InitFirst = initFirst;
     }
 
@@ -73,6 +81,11 @@ internal sealed class SoundChip
     public bool Owns(ushort address) => address >= BaseAddress && address < BaseAddress + Length && isRegister(address);
     public int ChannelOf(ushort address) => channelOf(address);
     public bool IsTrigger(ushort address) => isTrigger(address);
+
+    // The memory a write makes the chip play samples from (NES DMC), given
+    // the registers as they are after it; null for any other write.
+    public (ushort Address, int Length)? SampleStart(ushort address, byte value, byte[] shadow) =>
+        sampleStart(address, value, shadow);
 
     // Register writes that restore the chip configuration a capture starts in,
     // without restarting any note: control registers first, then the rest.

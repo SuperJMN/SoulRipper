@@ -59,6 +59,8 @@ internal static class Wire
         ["hash"] = s.Hash.ToString(),
         ["init"] = new JsonArray(s.Init.Select(w => (JsonNode)Ints(new[] { (int)w.Address, w.Value })).ToArray()),
         ["writes"] = new JsonArray(s.Writes.Select(w => (JsonNode)Ints(new[] { w.Frame, w.Address, w.Value })).ToArray()),
+        ["samples"] = new JsonArray((s.Samples ?? new()).Select(b =>
+            (JsonNode)new JsonArray(b.Frame, b.Address, Convert.ToBase64String(b.Data))).ToArray()),
     };
 
     public static Sound DecodeSound(JsonNode n) => new(
@@ -72,7 +74,8 @@ internal static class Wire
         n["channels"]!.AsArray().Select(x => (int)x!).ToArray(),
         ulong.Parse((string)n["hash"]!),
         n["init"]!.AsArray().Select(x => ((ushort)(int)x![0]!, (byte)(int)x[1]!)).ToList(),
-        n["writes"]!.AsArray().Select(x => ((int)x![0]!, (ushort)(int)x[1]!, (byte)(int)x[2]!)).ToList());
+        n["writes"]!.AsArray().Select(x => ((int)x![0]!, (ushort)(int)x[1]!, (byte)(int)x[2]!)).ToList(),
+        n["samples"]?.AsArray().Select(x => ((int)x![0]!, (ushort)(int)x[1]!, Convert.FromBase64String((string)x[2]!))).ToList());
 
     private static JsonArray Ints(IEnumerable<int> values) => new(values.Select(v => (JsonNode)v).ToArray());
 

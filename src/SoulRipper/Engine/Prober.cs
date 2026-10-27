@@ -37,10 +37,28 @@ internal sealed record AddressReport(ushort Address, byte BaseValue, List<Respon
 
 internal sealed record Sound(
     ushort Address, byte Value, string Kind, string End, int Frames, int? LoopStart, int? LoopFrames,
-    int[] Channels, ulong Hash, List<(ushort Address, byte Value)> Init, List<(int Frame, ushort Address, byte Value)> Writes)
+    int[] Channels, ulong Hash, List<(ushort Address, byte Value)> Init, List<(int Frame, ushort Address, byte Value)> Writes,
+    List<(int Frame, ushort Address, byte[] Data)>? Samples = null)
 {
     public string Id => $"{Address:X4}_{Value:X2}";
     public List<string> Aliases { get; } = new();
+
+    // Identifies what a sound plays; requests with the same hash are aliases.
+    public static ulong HashOf(int? loopStart, IEnumerable<(int Frame, ushort Address, byte Value)> writes,
+        IEnumerable<(int Frame, ushort Address, byte[] Data)> samples)
+    {
+        var hash = 1469598103934665603UL ^ (ulong)(loopStart ?? -1);
+        foreach (var (f, a, v) in writes)
+            hash = (hash ^ ((ulong)f << 24 | (ulong)a << 8 | v)) * 1099511628211UL;
+        // The same writes play other sounds if the DMC samples differ.
+        foreach (var (f, a, data) in samples)
+        {
+            hash = (hash ^ ((ulong)f << 24 | (ulong)a << 8 | 0xC2)) * 1099511628211UL;
+            foreach (var b in data)
+                hash = (hash ^ b) * 1099511628211UL;
+        }
+        return hash;
+    }
 }
 
 // Everything a prober needs to rebuild the same base state and run the same
@@ -386,6 +404,29 @@ internal sealed class Prober
         Poke(address, value);
 
         var timeline = new Timeline();
+
+        // DMC samples play from cartridge memory, which a VGM player lacks:
+        // keep the bytes each sample start points at, as banked at that moment.
+        // Which starts need loading depends on the loop, known only at the end.
+        var played = new List<(int Frame, ushort Address, byte[] Data)>();
+        var last = new Dictionary<ushort, byte[]>();
+        var observer = m.Write;
+        m.Write = (a, v, pc) =>
+        {
+            observer?.Invoke(a, v, pc);
+            if (m.Chip.SampleStart(a, v, m.ApuShadow) is not { } sample)
+                return;
+            foreach (var (start, length) in SampleMemory.Ranges(sample.Address, sample.Length))
+            {
+                // Drivers restart the same sample often: share its bytes.
+                var data = Read(start, length);
+                if (last.TryGetValue(start, out var known) && known.AsSpan().SequenceEqual(data))
+                    data = known;
+                last[start] = data;
+                played.Add((timeline.Count - 1, start, data));
+            }
+        };
+
         var diffs = new List<List<(ushort Address, byte Value)>>();
         var active = new List<int>();             // running count of frames with new writes
         var states = new Dictionary<(ulong, ulong), int>();
@@ -457,6 +498,7 @@ internal sealed class Prober
             }
             return true;
         }));
+        m.Write = observer;
 
         var channels = diffs.SelectMany(d => d).Select(w => m.Chip.ChannelOf(w.Address))
             .Where(c => c >= 0).Distinct().Order().ToArray();
@@ -486,12 +528,14 @@ internal sealed class Prober
             foreach (var (a, v) in kind is "music" or "jingle" ? timeline.Frames[f] : diffs[f])
                 writes.Add((f, a, v));
 
-        var hash = 1469598103934665603UL ^ (ulong)(loopStart ?? -1);
-        foreach (var (f, a, v) in writes)
-            hash = (hash ^ ((ulong)f << 24 | (ulong)a << 8 | v)) * 1099511628211UL;
+        var samples = SampleMemory.Blocks(played, frames, loopStart);
+        var hash = Sound.HashOf(loopStart, writes, samples);
 
-        return new Sound(address, value, kind, end, frames, loopStart, loopFrames, channels, hash, init, writes);
+        return new Sound(address, value, kind, end, frames, loopStart, loopFrames, channels, hash, init, writes, samples);
     }
+
+    private byte[] Read(ushort start, int length) =>
+        Enumerable.Range(0, length).Select(i => m.Peek((ushort)(start + i))).ToArray();
 
     private (ulong, ulong) SoundState(ushort[] stateRam)
     {

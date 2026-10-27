@@ -48,6 +48,22 @@ public sealed class RipWriterTests : IDisposable
     }
 
     [Fact]
+    public void Nes_music_carries_the_bytes_of_its_DMC_samples()
+    {
+        var music = Sounds.Of(0x04F4, 1, "music", frames: 200, loopStart: 199) with
+        {
+            Samples = new() { (120, 0xEA80, new byte[] { 0x55, 0xD5, 0xAA }) },
+        };
+
+        RipWriter.Write(new RipResult("Test", "nes", 60, Reach.Default, new[] { music }),
+            outDir, new Dictionary<string, string>(), keepSuspect: false);
+
+        var vgm = Gunzip(Path.Combine(outDir, "music", "01 - Music 01.vgz"));
+        byte[] block = [0x67, 0x66, 0xC2, 5, 0, 0, 0, 0x80, 0xEA, 0x55, 0xD5, 0xAA];
+        Assert.True(vgm.AsSpan().IndexOf(block) > 0);
+    }
+
+    [Fact]
     public void Uncompressed_output_writes_plain_vgm()
     {
         var entries = RipWriter.Write(Rip(Sounds.Of(0xA460, 5)), outDir, new Dictionary<string, string>(),

@@ -9,7 +9,7 @@ Dream Land (GB); Super Mario Bros. 1 and 3, Mega Man 2, Zelda (NES).
 - C# tool (`soulripper`, PackageId `SoulRipper.Tool`) replacing the Python
   scripts, FCEUX and `gbsweep`: discovery engine, worker pool, NSF/GBS
   players, online hints (No-Intro + joshw.info), VGM writer, output folders,
-  draft profiles; 26 unit tests.
+  draft profiles; 42 unit tests.
 - Silencing the base state: request stoppers (`$FF` first), validated so
   that garbage values that hang or reset the game and pause flags are
   rejected; driver-RAM reset as a fallback; set-based silence check (some
@@ -24,6 +24,12 @@ Dream Land (GB); Super Mario Bros. 1 and 3, Mega Man 2, Zelda (NES).
   machines measure their audio output, so a Game Boy note fading through its
   envelope is kept (SML2's coin: 1.1 s instead of 0.08 s), and requests that
   write the chip but are never heard are dropped (17 garbage SML2 values).
+- NES DMC samples: each sample start keeps the bytes it plays, read from
+  cartridge memory as banked at that moment, and the VGM loads them into the
+  player's APU RAM (data blocks of type `0xC2`) only when it does not already
+  hold them; a loop loads its own. SMB3's Music 01 now plays its two final
+  samples (bytes match the PRG ROM; 73 blocks across the rip, Music 26 down
+  from 49 to 2).
 - Emulator libraries published to NuGet (`Zafiro.GameBoy.Debug.Emulator`,
   `Zafiro.Nes.Debug.Emulator`); public repository; Fleet project; first
   release (0.1.0, tagged).

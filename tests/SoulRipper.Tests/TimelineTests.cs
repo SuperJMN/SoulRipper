@@ -1,6 +1,6 @@
 namespace SoulRipper.Tests;
 
-public class TimelineTests
+public sealed class TimelineTests
 {
     private static readonly (ushort, byte)[] Idle = { (0x4017, 0xFF), (0x4015, 0x0F) };
 

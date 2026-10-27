@@ -19,14 +19,17 @@ internal sealed class Timeline
 
     // Writes of `frame` that the reference did not make in its same frame
     // (multiset difference, order preserved). Concurrent music cancels out.
+    // Past its end the reference is taken to repeat its last frame, which is
+    // what a silenced driver keeps writing: otherwise a sound that outlasts it
+    // (SMB2's title music) never ends and loops on the idle writes.
     public List<(ushort Address, byte Value)> DiffFrame(int frame, Timeline reference)
     {
         var mine = Frames[frame];
-        if (frame >= reference.Count)
+        if (reference.Count == 0)
             return mine.ToList();
 
         var pool = new Dictionary<(ushort, byte), int>();
-        foreach (var w in reference.Frames[frame])
+        foreach (var w in reference.Frames[Math.Min(frame, reference.Count - 1)])
             pool[w] = pool.GetValueOrDefault(w) + 1;
 
         var result = new List<(ushort, byte)>();

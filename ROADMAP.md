@@ -24,6 +24,16 @@ Dream Land (GB); Super Mario Bros. 1 and 3, Mega Man 2, Zelda (NES).
   machines measure their audio output, so a Game Boy note fading through its
   envelope is kept (SML2's coin: 1.1 s instead of 0.08 s), and requests that
   write the chip but are never heard are dropped (17 garbage SML2 values).
+- SMB2 (USA, Rev A) names match its sounds: NSF playlists number tracks
+  from 1 and were read from 0, so every name went to the next track's
+  request (a 0.65 s effect was "It's just a Dream..."). The 14 names now
+  agree with the playlist lengths ("It's just a Dream..." 70.6 s + 29.8 s
+  loop = 100.4 s); SMB1's 13 too ("Running About" is the 88.7 s overworld,
+  not the 12.6 s underground). Sounds that outlast the 15 s reference no longer loop
+  on the idle driver's writes: the title music is a 28.5 s jingle instead
+  of music with a silent one-frame loop. Its 8 silent files are DMC-only
+  effects (queue `$0601`); they sound once the DMC samples are written
+  (all 33 files audible with the `dmc-samples` work, issue #7).
 - Emulator libraries published to NuGet (`Zafiro.GameBoy.Debug.Emulator`,
   `Zafiro.Nes.Debug.Emulator`); public repository; Fleet project; first
   release (0.1.0, tagged).

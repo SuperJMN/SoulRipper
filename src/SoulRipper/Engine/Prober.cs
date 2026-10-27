@@ -42,6 +42,23 @@ internal sealed record Sound(
 {
     public string Id => $"{Address:X4}_{Value:X2}";
     public List<string> Aliases { get; } = new();
+
+    // Identifies what a sound plays; requests with the same hash are aliases.
+    public static ulong HashOf(int? loopStart, IEnumerable<(int Frame, ushort Address, byte Value)> writes,
+        IEnumerable<(int Frame, ushort Address, byte[] Data)> samples)
+    {
+        var hash = 1469598103934665603UL ^ (ulong)(loopStart ?? -1);
+        foreach (var (f, a, v) in writes)
+            hash = (hash ^ ((ulong)f << 24 | (ulong)a << 8 | v)) * 1099511628211UL;
+        // The same writes play other sounds if the DMC samples differ.
+        foreach (var (f, a, data) in samples)
+        {
+            hash = (hash ^ ((ulong)f << 24 | (ulong)a << 8 | 0xC2)) * 1099511628211UL;
+            foreach (var b in data)
+                hash = (hash ^ b) * 1099511628211UL;
+        }
+        return hash;
+    }
 }
 
 // Everything a prober needs to rebuild the same base state and run the same
@@ -390,20 +407,23 @@ internal sealed class Prober
 
         // DMC samples play from cartridge memory, which a VGM player lacks:
         // keep the bytes each sample start points at, as banked at that moment.
-        var samples = new List<(int Frame, ushort Address, byte[] Data)>();
-        var played = new Dictionary<ushort, byte[]>();
+        // Which starts need loading depends on the loop, known only at the end.
+        var played = new List<(int Frame, ushort Address, byte[] Data)>();
+        var last = new Dictionary<ushort, byte[]>();
         var observer = m.Write;
         m.Write = (a, v, pc) =>
         {
             observer?.Invoke(a, v, pc);
             if (m.Chip.SampleStart(a, v, m.ApuShadow) is not { } sample)
                 return;
-            foreach (var (start, data) in SampleBlocks(sample.Address, sample.Length))
+            foreach (var (start, length) in SampleMemory.Ranges(sample.Address, sample.Length))
             {
-                if (played.TryGetValue(start, out var known) && known.AsSpan().SequenceEqual(data))
-                    continue;
-                played[start] = data;
-                samples.Add((timeline.Count - 1, start, data));
+                // Drivers restart the same sample often: share its bytes.
+                var data = Read(start, length);
+                if (last.TryGetValue(start, out var known) && known.AsSpan().SequenceEqual(data))
+                    data = known;
+                last[start] = data;
+                played.Add((timeline.Count - 1, start, data));
             }
         };
 
@@ -508,21 +528,10 @@ internal sealed class Prober
             foreach (var (a, v) in kind is "music" or "jingle" ? timeline.Frames[f] : diffs[f])
                 writes.Add((f, a, v));
 
-        var hash = 1469598103934665603UL ^ (ulong)(loopStart ?? -1);
-        foreach (var (f, a, v) in writes)
-            hash = (hash ^ ((ulong)f << 24 | (ulong)a << 8 | v)) * 1099511628211UL;
+        var samples = SampleMemory.Blocks(played, frames, loopStart);
+        var hash = Sound.HashOf(loopStart, writes, samples);
 
-        return new Sound(address, value, kind, end, frames, loopStart, loopFrames, channels, hash, init, writes,
-            samples.Where(s => s.Frame < frames).ToList());
-    }
-
-    // The memory a sample plays; past $FFFF the DMC wraps to $8000.
-    private IEnumerable<(ushort Address, byte[] Data)> SampleBlocks(ushort start, int length)
-    {
-        var first = Math.Min(length, 0x10000 - start);
-        yield return (start, Read(start, first));
-        if (first < length)
-            yield return (0x8000, Read(0x8000, length - first));
+        return new Sound(address, value, kind, end, frames, loopStart, loopFrames, channels, hash, init, writes, samples);
     }
 
     private byte[] Read(ushort start, int length) =>

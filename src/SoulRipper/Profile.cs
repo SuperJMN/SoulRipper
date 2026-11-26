@@ -1,17 +1,37 @@
 using System.Text.Json;
+using SoulRipper.Hints;
 
 namespace SoulRipper;
 
 // A curated description of a game: how to reach a playable state and what
-// its sound requests are called. Every field is optional.
+// its sound requests are called. Every field is optional. A profile that
+// lists the CRC32s of its ROMs ("crc") ships inside the tool and is used for
+// them without --profile.
 internal sealed record Profile(string? Name, string Author, string Date, Reach? Reach,
-    IReadOnlyList<(ushort Queue, byte Value, string Name)> Requests)
+    IReadOnlyList<(ushort Queue, byte Value, string Name)> Requests, IReadOnlyList<string> Crcs)
 {
-    public static readonly Profile Empty = new(null, "", "", null, Array.Empty<(ushort, byte, string)>());
+    public static readonly Profile Empty = new(null, "", "", null, Array.Empty<(ushort, byte, string)>(), Array.Empty<string>());
 
-    public static Profile Load(string path)
+    public static Profile Load(string path) => Parse(File.ReadAllText(path));
+
+    // The built-in profile for a ROM, by the CRC32s No-Intro lists for it.
+    public static Profile? ForRom(byte[] rom) => ForCrcs(GameHints.RomCrcs(rom));
+
+    public static Profile? ForCrcs(IReadOnlySet<string> crcs) => BuiltIn().FirstOrDefault(p => p.Crcs.Any(crcs.Contains));
+
+    public static IEnumerable<Profile> BuiltIn()
     {
-        using var doc = JsonDocument.Parse(File.ReadAllText(path));
+        var assembly = typeof(Profile).Assembly;
+        foreach (var resource in assembly.GetManifestResourceNames().Where(n => n.StartsWith("profiles/", StringComparison.Ordinal)).Order())
+        {
+            using var reader = new StreamReader(assembly.GetManifestResourceStream(resource)!);
+            yield return Parse(reader.ReadToEnd());
+        }
+    }
+
+    public static Profile Parse(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
         string Text(string key) => root.TryGetProperty(key, out var e) && e.ValueKind == JsonValueKind.String ? e.GetString()! : "";
 
@@ -30,7 +50,10 @@ internal sealed record Profile(string? Name, string Author, string Date, Reach? 
                 requests.Add(((ushort)Number(q), (byte)Number(v), name));
             }
         }
-        return new Profile(Text("name") is { Length: > 0 } game ? game : null, Text("author"), Text("date"), reach, requests);
+        var crcs = root.TryGetProperty("crc", out var c) && c.ValueKind == JsonValueKind.Array
+            ? c.EnumerateArray().Select(e => e.GetString()!.ToUpperInvariant()).ToList()
+            : new List<string>();
+        return new Profile(Text("name") is { Length: > 0 } game ? game : null, Text("author"), Text("date"), reach, requests, crcs);
     }
 
     public IEnumerable<ushort> Queues => Requests.Select(r => r.Queue).Distinct();

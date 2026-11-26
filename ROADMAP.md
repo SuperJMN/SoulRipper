@@ -9,7 +9,7 @@ Dream Land (GB); Super Mario Bros. 1 and 3, Mega Man 2, Zelda (NES).
 - C# tool (`soulripper`, PackageId `SoulRipper.Tool`) replacing the Python
   scripts, FCEUX and `gbsweep`: discovery engine, worker pool, NSF/GBS
   players, online hints (No-Intro + joshw.info), VGM writer, output folders,
-  draft profiles; 53 unit tests.
+  draft profiles; 65 unit tests.
 - Silencing the base state: request stoppers (`$FF` first), validated so
   that garbage values that hang or reset the game and pause flags are
   rejected; driver-RAM reset as a fallback; set-based silence check (some
@@ -58,6 +58,24 @@ Dream Land (GB); Super Mario Bros. 1 and 3, Mega Man 2, Zelda (NES).
   now repeated rips of SMB2, SMB3 and SML, and SMB2 with `--jobs 1`, give
   identical `sounds.json` and byte-identical files. `--jobs 1` works again:
   its items now go through JSON text as they do to workers.
+- Track names from vgmrips.net: the game's VGM pack names what the NSF/GBS
+  playlists miss, paired with captures by melody (per-channel pitch
+  changes), since raw writes from another player barely match (Zelda's
+  Overworld: 0.15 on writes, 0.99 on pitches). Zelda (NES), whose NSF has no
+  playlists, gets all 15 of its pack's names (5 music, 3 jingles, 7 short
+  ones such as Flute and Secret Jingle); on Mega Man II (GB) 17 of 19 pack
+  tracks score 0.6-0.99 against the right capture, wrong pairs at most 0.49.
+- Built-in profiles: a profile with a `crc` list ships inside the tool and
+  is used for those ROMs without `--profile`. Link's Awakening's names its
+  effects from the disassembly's `JINGLE_*`, `WAVE_SFX_*` and `NOISE_SFX_*`
+  constants: 151 of its 156 effects get a name (the other 5 are the
+  `UNKNOWN_*` ones), and its 92 musics keep their GBS playlist names.
+- Requests that start the same sound a frame apart are aliases: alias
+  hashes count frames from the first one that writes more than every frame
+  does. Link's Awakening's effects came out twice, from hJingle `$FFF2`
+  and the wActiveJingle `$D360` the driver copies it to (and the same for
+  wave and noise): 305 effect files and 41 jingles are now 156 and 37.
+  Zelda (NES) gives the same files as before.
 - Emulator libraries published to NuGet (`Zafiro.GameBoy.Debug.Emulator`,
   `Zafiro.Nes.Debug.Emulator`); public repository; Fleet project; first
   release (0.1.0, tagged).
@@ -83,12 +101,15 @@ Dream Land (GB); Super Mario Bros. 1 and 3, Mega Man 2, Zelda (NES).
    queues: its requests go through a ring buffer, not a byte), SML2.
 4. **Suspect rules for garbage music.** Music that never loops or ends
    within the cap is likely garbage; consider marking it suspect.
-5. **Effect names.** Community rips name music only. Effects could be named
-   from the code that requests them (e.g. the request next to a BCD
-   increment of a counter), but that does not generalise; a curated name
-   database keyed by ROM CRC and request would.
-6. **NSF rips without playlists** (SMB3, Zelda): no track names. Look for
-   NSFe sets (`tlbl` chunk) or other playlist sources.
+5. **Effect names.** Community rips name music only. Built-in profiles
+   keyed by ROM CRC name effects (Link's Awakening, from its disassembly);
+   more need a disassembly with named constants or curation by ear. Naming
+   them from the code that requests them (e.g. the request next to a BCD
+   increment of a counter) does not generalise.
+6. **NSF rips without playlists** (SMB3, Zelda): names now come from the
+   vgmrips.net pack when there is one (Zelda: all 15; SMB3 has a pack but
+   is not re-checked yet). Look for NSFe sets (`tlbl` chunk) for games
+   without a pack.
 7. **Ring-buffer request queues** (Mega Man 2): requests written to a
    buffer by a game routine. Detect the routine that writes the buffer and
    call it, or poke buffer + index together.

@@ -44,20 +44,44 @@ internal sealed record Sound(
     public List<string> Aliases { get; } = new();
 
     // Identifies what a sound plays; requests with the same hash are aliases.
+    // Frames count from where the sound starts: a request byte the driver
+    // copies to another before playing starts the same sound a frame later
+    // (Link's Awakening's hJingle $FFF2 and wActiveJingle $D360), and that
+    // delay does not make it another sound. Leading frames that only repeat
+    // what every frame writes (its idle driver rewrites NR50 each frame,
+    // which jingles keep) are not the start.
     public static ulong HashOf(int? loopStart, IEnumerable<(int Frame, ushort Address, byte Value)> writes,
         IEnumerable<(int Frame, ushort Address, byte[] Data)> samples)
     {
-        var hash = 1469598103934665603UL ^ (ulong)(loopStart ?? -1);
-        foreach (var (f, a, v) in writes)
-            hash = (hash ^ ((ulong)f << 24 | (ulong)a << 8 | v)) * 1099511628211UL;
+        var written = writes.ToList();
+        var played = samples.ToList();
+        var start = Start(written, played);
+        var hash = 1469598103934665603UL ^ (ulong)(loopStart - start ?? -1);
+        foreach (var (f, a, v) in written.Where(w => w.Frame >= start))
+            hash = (hash ^ ((ulong)(f - start) << 24 | (ulong)a << 8 | v)) * 1099511628211UL;
         // The same writes play other sounds if the DMC samples differ.
-        foreach (var (f, a, data) in samples)
+        foreach (var (f, a, data) in played.Where(b => b.Frame >= start))
         {
-            hash = (hash ^ ((ulong)f << 24 | (ulong)a << 8 | 0xC2)) * 1099511628211UL;
+            hash = (hash ^ ((ulong)(f - start) << 24 | (ulong)a << 8 | 0xC2)) * 1099511628211UL;
             foreach (var b in data)
                 hash = (hash ^ b) * 1099511628211UL;
         }
         return hash;
+    }
+
+    // First frame that writes something not written in every frame, or
+    // starts a sample.
+    private static int Start(List<(int Frame, ushort Address, byte Value)> writes, List<(int Frame, ushort Address, byte[] Data)> samples)
+    {
+        if (writes.Count == 0)
+            return samples.Count == 0 ? 0 : samples.Min(b => b.Frame);
+        var byFrame = writes.ToLookup(w => w.Frame, w => (w.Address, w.Value));
+        var last = writes.Max(w => w.Frame);
+        var always = byFrame[0].ToHashSet();
+        for (var f = 1; f <= last && always.Count > 0; f++)
+            always.IntersectWith(byFrame[f]);
+        var first = Enumerable.Range(0, last + 1).FirstOrDefault(f => byFrame[f].Any(w => !always.Contains(w)));
+        return samples.Count == 0 ? first : Math.Min(first, samples.Min(b => b.Frame));
     }
 }
 

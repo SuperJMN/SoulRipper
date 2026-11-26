@@ -73,7 +73,10 @@ internal static class Program
     private static int Rip(Options opt)
     {
         using var rom = RomFile.Open(RomArgument(opt));
-        var profile = opt.Get("profile") is { } path ? Profile.Load(path) : Profile.Empty;
+        var builtIn = opt.Get("profile") is null ? Profile.ForRom(File.ReadAllBytes(rom.Path)) : null;
+        if (builtIn is not null)
+            Console.WriteLine("Using the built-in profile for this ROM");
+        var profile = opt.Get("profile") is { } path ? Profile.Load(path) : builtIn ?? Profile.Empty;
         var game = profile.Name ?? rom.Title();
 
         var hints = GameHints.None;

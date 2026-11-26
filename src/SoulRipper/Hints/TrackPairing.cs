@@ -47,6 +47,41 @@ internal static class TrackPairing
         return names;
     }
 
+    // Minimum melodic similarity to pair a VGM pack track with a capture. On
+    // Zelda and Mega Man II (GB) right pairs score 0.57-0.99 and wrong ones at
+    // most 0.49; missing a name is better than a wrong one.
+    public const double MelodyThreshold = 0.6;
+
+    // Fewer pitches than this match too many captures by chance.
+    public const int MinNotes = 4;
+
+    // {sound id: title} for VGM pack tracks, which come from another player and
+    // so are compared by melody. Best pairs first; each sound and each title
+    // is used once.
+    public static Dictionary<string, string> PairByMelody(IReadOnlyList<Sound> sounds, IReadOnlyList<VgmTrack> tracks)
+    {
+        var captured = sounds.Select(s => (s.Id, Melody: Melody.Of(s.Writes.Select(w => (w.Address, w.Value)))))
+            .Where(x => x.Melody.Count >= MinNotes).ToList();
+        var scored = new List<(double Score, string Id, string Title)>();
+        foreach (var track in tracks.Where(t => t.Title.Length > 0))
+        {
+            var melody = Melody.Of(track.Writes);
+            if (melody.Count < MinNotes)
+                continue;
+            foreach (var (id, other) in captured)
+                if (melody.Bound(other) >= MelodyThreshold && melody.Similarity(other) is var score && score >= MelodyThreshold)
+                    scored.Add((score, id, track.Title));
+        }
+
+        var names = new Dictionary<string, string>();
+        var used = new HashSet<string>();
+        foreach (var (_, id, title) in scored.OrderByDescending(x => x.Score)
+                     .ThenBy(x => x.Id, StringComparer.Ordinal).ThenBy(x => x.Title, StringComparer.Ordinal))
+            if (!names.ContainsKey(id) && used.Add(title))
+                names[id] = title;
+        return names;
+    }
+
     // RAM bytes the rip's INIT leaves with many different values across
     // tracks: the game's request bytes (a rip often spreads music and effects
     // over several), to probe even if analysis did not spot them.

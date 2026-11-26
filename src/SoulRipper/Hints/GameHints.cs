@@ -9,7 +9,9 @@ namespace SoulRipper.Hints;
 //  1. its name, from the ROM's CRC32 in the No-Intro DATs (libretro-database);
 //  2. its NSF/GBS set on joshw.info, whose playlists name every track;
 //  3. playing that rip: its INIT stores the game's own request byte, which
-//     tells discovery where to look and pairs each track with a capture.
+//     tells discovery where to look and pairs each track with a capture;
+//  4. its VGM pack on vgmrips.net, whose tags name the tracks the set's
+//     playlists miss (or the set itself, when it has none).
 // Downloads are cached.
 internal sealed class GameHints
 {
@@ -32,18 +34,20 @@ internal sealed class GameHints
         ["gb"] = new[] { ".gbs" },
     };
 
-    public static readonly GameHints None = new(null, Array.Empty<PlaylistTrack>(), null);
+    public static readonly GameHints None = new(null, Array.Empty<PlaylistTrack>(), null, Array.Empty<VgmTrack>());
 
-    public GameHints(string? game, IReadOnlyList<PlaylistTrack> playlist, PlayedRip? played)
+    public GameHints(string? game, IReadOnlyList<PlaylistTrack> playlist, PlayedRip? played, IReadOnlyList<VgmTrack> pack)
     {
         Game = game;
         Playlist = playlist;
         Played = played;
+        Pack = pack;
     }
 
     public string? Game { get; }
     public IReadOnlyList<PlaylistTrack> Playlist { get; }
     public PlayedRip? Played { get; }
+    public IReadOnlyList<VgmTrack> Pack { get; }
 
     public IReadOnlyList<ushort> Queues => Played is null ? Array.Empty<ushort>() : TrackPairing.RequestBytes(Played);
 
@@ -51,8 +55,16 @@ internal sealed class GameHints
     public IReadOnlyDictionary<ushort, HashSet<byte>> KnownRequests =>
         Played is null ? new Dictionary<ushort, HashSet<byte>>() : TrackPairing.KnownRequests(Played);
 
-    public Dictionary<string, string> Names(IReadOnlyList<Sound> sounds) =>
-        Played is null || Playlist.Count == 0 ? new() : TrackPairing.Pair(sounds, Played, Playlist);
+    // The set's playlist names first (its tracks are paired by the request
+    // they store); the VGM pack names what it left unnamed.
+    public Dictionary<string, string> Names(IReadOnlyList<Sound> sounds)
+    {
+        var names = Played is null || Playlist.Count == 0 ? new() : TrackPairing.Pair(sounds, Played, Playlist);
+        var unnamed = sounds.Where(s => !s.Aliases.Prepend(s.Id).Any(names.ContainsKey)).ToList();
+        foreach (var (id, title) in TrackPairing.PairByMelody(unnamed, Pack))
+            names.TryAdd(id, title);
+        return names;
+    }
 
     public static string CacheDir => Path.Combine(
         Environment.GetEnvironmentVariable("XDG_CACHE_HOME") is { Length: > 0 } xdg
@@ -77,28 +89,45 @@ internal sealed class GameHints
             }
             log($"hints: identified as {game}");
 
+            var pack = PackOf(http, game, system, log);
             var url = FindRip(http, game, system);
             if (url is null)
             {
                 log("hints: no NSF/GBS set found on joshw.info");
-                return new GameHints(game, Array.Empty<PlaylistTrack>(), null);
+                return new GameHints(game, Array.Empty<PlaylistTrack>(), null, pack);
             }
             var folder = FetchRip(http, url);
             var rip = Directory.EnumerateFiles(folder)
                 .FirstOrDefault(f => RipExtensions[system].Contains(Path.GetExtension(f).ToLowerInvariant()));
             if (rip is null)
-                return new GameHints(game, Array.Empty<PlaylistTrack>(), null);
+                return new GameHints(game, Array.Empty<PlaylistTrack>(), null, pack);
 
             var played = PlayedRip.FromFile(rip);
             var playlist = Playlists.Parse(folder);
             log($"hints: {Path.GetFileName(folder)}: {played.Tracks.Count} tracks, {playlist.Count} named");
-            return new GameHints(game, playlist, played);
+            return new GameHints(game, playlist, played, pack);
         }
         catch (Exception ex) when (ex is HttpRequestException or IOException or TaskCanceledException
                                        or InvalidOperationException or ArgumentException)
         {
             log($"hints unavailable: {ex.Message}");
             return None;
+        }
+    }
+
+    // The game's VGM pack tracks; none when the site fails, so the other
+    // hints still count.
+    private static IReadOnlyList<VgmTrack> PackOf(HttpClient http, string game, string system, Action<string> log)
+    {
+        try
+        {
+            return VgmRips.Lookup(http, game, system, log);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or IOException or TaskCanceledException
+                                       or InvalidOperationException or ArgumentException or InvalidDataException)
+        {
+            log($"hints: vgmrips.net unavailable: {ex.Message}");
+            return Array.Empty<VgmTrack>();
         }
     }
 
@@ -168,7 +197,7 @@ internal sealed class GameHints
         return folder;
     }
 
-    private static string Get(HttpClient http, string url, string path)
+    internal static string Get(HttpClient http, string url, string path)
     {
         if (File.Exists(path))
             return path;

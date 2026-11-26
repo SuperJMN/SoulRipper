@@ -89,6 +89,13 @@ NSF/GBS set is fetched from [joshw.info](https://joshw.info):
 - each rip track is paired with the capture it requests or sounds like, and
   the capture takes its name.
 
+Its VGM pack on [vgmrips.net](https://vgmrips.net), when there is one, names
+what the playlists left unnamed (or everything, when the set has no
+playlists, as with Zelda's NSF). Pack tracks come from other players, so
+they are paired with captures by melody: the pitches each channel plays,
+without timing or repeated writes. A track that matches no capture well
+enough names nothing.
+
 Downloads are cached in `~/.cache/soulripper`.
 
 ## Profiles
@@ -112,8 +119,14 @@ A profile is optional knowledge about a game. Every field is optional:
 
 The entries name the sounds they request, and their queues are always
 probed. `profiles/` holds curated ones for Super Mario Land, Super Mario
-Land 2 and Super Mario Bros. 3; `profile.json` in every output is a draft to
-start from.
+Land 2, Super Mario Bros. 3 and Link's Awakening; `profile.json` in every
+output is a draft to start from.
+
+A profile that lists the CRC32s of its ROMs (`"crc": ["8CF27C90", ...]`, as
+in the No-Intro DATs) ships inside the tool and is used for those ROMs
+without `--profile`; its names take precedence over the online ones.
+Link's Awakening's profile names its ~150 effects this way, from the
+constants of its [disassembly](https://github.com/zladx/LADX-Disassembly).
 
 ## Advanced commands
 

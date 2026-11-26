@@ -21,4 +21,33 @@ public class SoundTests
 
         Assert.Equal(first, second);
     }
+
+    [Fact]
+    public void A_sound_that_starts_a_frame_later_is_an_alias()
+    {
+        var now = Sound.HashOf(4, new List<(int, ushort, byte)> { (0, 0xFF12, 0xF0), (2, 0xFF14, 0x87) }, []);
+        var later = Sound.HashOf(5, new List<(int, ushort, byte)> { (1, 0xFF12, 0xF0), (3, 0xFF14, 0x87) }, []);
+
+        Assert.Equal(now, later);
+    }
+
+    [Fact]
+    public void Sounds_whose_writes_are_spaced_differently_are_not_aliases()
+    {
+        var fast = Sound.HashOf(null, new List<(int, ushort, byte)> { (0, 0xFF12, 0xF0), (1, 0xFF14, 0x87) }, []);
+        var slow = Sound.HashOf(null, new List<(int, ushort, byte)> { (0, 0xFF12, 0xF0), (2, 0xFF14, 0x87) }, []);
+
+        Assert.NotEqual(fast, slow);
+    }
+
+    [Fact]
+    public void Frames_that_only_repeat_the_idle_writes_do_not_delay_a_jingle()
+    {
+        var now = Sound.HashOf(null, new List<(int, ushort, byte)>
+            { (0, 0xFF24, 0x77), (0, 0xFF12, 0xF0), (1, 0xFF24, 0x77), (2, 0xFF24, 0x77) }, []);
+        var later = Sound.HashOf(null, new List<(int, ushort, byte)>
+            { (0, 0xFF24, 0x77), (1, 0xFF24, 0x77), (1, 0xFF12, 0xF0), (2, 0xFF24, 0x77), (3, 0xFF24, 0x77) }, []);
+
+        Assert.Equal(now, later);
+    }
 }

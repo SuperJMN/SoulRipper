@@ -33,4 +33,19 @@ public sealed class ProfileTests : IDisposable
 
         Assert.Equal(181, Profile.Load(path).Reach!.Boot);
     }
+
+    [Fact]
+    public void A_built_in_profile_is_picked_by_the_rom_crc()
+    {
+        var profile = Profile.ForCrcs(new HashSet<string> { "8CF27C90" });
+
+        Assert.Equal("Treasure Found", profile!.Names()["FFF2_01"]);
+        Assert.Equal("Treasure Found", profile.Names()["D360_01"]);
+    }
+
+    [Fact]
+    public void Roms_without_a_built_in_profile_get_none()
+    {
+        Assert.Null(Profile.ForCrcs(new HashSet<string> { "00000000" }));
+    }
 }

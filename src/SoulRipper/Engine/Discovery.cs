@@ -42,7 +42,7 @@ internal sealed class Discovery(Prober local, IWorkPool pool, DiscoverySettings 
         if (triggers.Count == 0)
             return new List<Sound>();
 
-        ctx = Applied(ctx with { Guarded = triggers.Select(t => t.Address).ToArray() });
+        ctx = Applied(ctx with { Guarded = triggers.Select(t => t.Address).ToArray(), Consumers = ConsumersOf(triggers) });
         if (s.Rebase)
             (ctx, triggers) = RebaseOnSilence(ctx, triggers, idleState);
 
@@ -83,52 +83,147 @@ internal sealed class Discovery(Prober local, IWorkPool pool, DiscoverySettings 
             return (ctx, triggers);
         }
 
-        var tests = triggers.SelectMany(t => t.Responses.Select(r => (t.Address, r.Value))).ToList();
-        var silent = pool.Map("silent", ctx, tests.Select(t => (JsonNode?)ProberOps.Request(t.Address, t.Value)).ToList());
-        var responding = triggers.Sum(t => t.Responses.Count);
-        var playing = tests.Where((_, i) => !(bool)silent[i]!).ToList();
-        var sample = playing.Where((_, i) => i % Math.Max(1, playing.Count / 32) == 0)
-            .Select(t => (JsonNode?)ProberOps.Request(t.Address, t.Value)).ToList();
-
-        // $FF is the usual "stop" value, so it is tried first.
-        var silencers = tests.Where((_, i) => (bool)silent[i]!).OrderBy(t => t.Value != 0xFF).Take(6)
-            .Select(t => (Name: $"{t.Address:X4} = {t.Value:X2}", Pokes: (IReadOnlyList<(ushort, byte)>)new[] { t }))
+        var origByAddr = triggers.ToDictionary(t => t.Address, t => t.Responses.Count);
+        var distinct = triggers.SelectMany(t => t.Responses.GroupBy(r => r.Signature)
+                .Select(g => (t.Address, g.OrderBy(r => StopPriority(r.Value)).First().Value)))
             .ToList();
+
+        (ProbeContext, List<AddressReport>)? TrySilencers(IEnumerable<(string Name, IReadOnlyList<(ushort Address, byte Value)> Pokes, ushort? Source)> candidates)
+        {
+            foreach (var (name, pokes, source) in candidates)
+            {
+                var rebased = Applied(ctx with { Rebase = pokes });
+                if (pokes.Count > 1 && !(bool)pool.Map("silent", rebased, new JsonNode?[] { null })[0]!)
+                {
+                    log($"  {name} does not silence the music; skipped");
+                    continue;
+                }
+                var resweep = Sweep(rebased, rebased.Guarded);
+                // If a ring-buffer queue advanced its read index when consuming the
+                // stop command (DuckTales $C8-$CF), its dispatcher now reads the
+                // next slot: probe any new bytes read near the trigger consumers.
+                if (resweep.Any(r => r.Responses.Count * 2 < origByAddr[r.Address]))
+                {
+                    var consumerPcs = (rebased.Consumers ?? Array.Empty<ConsumerRule>()).Select(r => r.Pc).ToArray();
+                    var extra = local.ReadsNear(consumerPcs)
+                        .Where(a => !rebased.Guarded.Contains(a)).ToList();
+                    if (extra.Count > 0)
+                        resweep.AddRange(Sweep(rebased, extra));
+                }
+
+                var surviving = resweep.Where(a => a.IsTrigger).ToList();
+                if (!DriverAlive(source, triggers, surviving))
+                {
+                    log($"  {name} silences by breaking the driver " +
+                        $"({string.Join(", ", resweep.Select(r => $"{r.Address:X4}: {r.Responses.Count}"))}); skipped");
+                    continue;
+                }
+
+                // Keep the rebased-poke addresses guarded alongside the
+                // surviving triggers so rebuilding the base state runs under
+                // the same guard on the stop byte, plus the new slot's rules.
+                var guarded = surviving.Select(a => a.Address).Concat(pokes.Select(p => p.Address)).Distinct().Order().ToArray();
+                var consumers = (ctx.Consumers ?? Array.Empty<ConsumerRule>())
+                    .Where(r => guarded.Contains(r.Address))
+                    .Concat(ConsumersOf(surviving))
+                    .Distinct().ToList();
+                var prevChecksum = rebased.BaseChecksum;
+                rebased = Applied(rebased with { Guarded = guarded, Consumers = consumers });
+                if (rebased.BaseChecksum != prevChecksum)
+                    surviving = Sweep(rebased, surviving.Select(a => a.Address).ToList()).Where(a => a.IsTrigger).ToList();
+                var sample = SampleOf(surviving);
+                var stillPlaying = pool.Map("silent", rebased, sample).Count(n => !(bool)n!);
+                if (sample.Count > 0 && stillPlaying * 10 < sample.Count)
+                {
+                    log($"  {name} silences everything that follows (a pause flag?); skipped");
+                    continue;
+                }
+
+                Rebased = name;
+                log($"rebased on silence: {name}");
+                var reswept = resweep.Select(a => a.Address).ToHashSet();
+                Addresses = resweep.Concat(Addresses.Where(a => !reswept.Contains(a.Address))).ToList();
+                return (rebased, surviving);
+            }
+            return null;
+        }
+
+        List<(string, IReadOnlyList<(ushort, byte)>, ushort?)> SilencersIn(List<(ushort Address, byte Value)> batch, int limit)
+        {
+            if (batch.Count == 0 || limit <= 0) return new();
+            var silent = pool.Map("silent", ctx, batch.Select(t => (JsonNode?)ProberOps.Request(t.Address, t.Value)).ToList());
+            // $FF is the usual "stop" value, so it is tried first; spread across
+            // triggers so false channel-state triggers cannot crowd out the queue.
+            return batch.Where((_, i) => (bool)silent[i]!)
+                .GroupBy(t => t.Address)
+                .SelectMany(g => g.OrderBy(t => StopPriority(t.Value)).Select((t, rank) => (Test: t, Rank: rank)))
+                .OrderBy(x => StopPriority(x.Test.Value)).ThenBy(x => x.Rank).Take(limit)
+                .Select(x => ($"{x.Test.Address:X4} = {x.Test.Value:X2}",
+                    (IReadOnlyList<(ushort, byte)>)new[] { x.Test }, (ushort?)x.Test.Address))
+                .ToList();
+        }
+
+        // Try common stop commands first ($FF/$FE/$80/$00) before testing every
+        // responding value of every trigger (which may include hundreds of
+        // channel-state false positives while music plays).
+        const int maxSingleByteSilencers = 6;
+        var commonStops = distinct.Where(t => StopPriority(t.Value) < 4).ToList();
+        var fastCandidates = SilencersIn(commonStops, maxSingleByteSilencers);
+        if (TrySilencers(fastCandidates) is { } fast)
+            return fast;
+
+        var rest = distinct.Where(t => StopPriority(t.Value) >= 4).ToList();
+        var fallback = SilencersIn(rest, maxSingleByteSilencers - fastCandidates.Count);
         var driverRam = local.DriverRam();
         if (idleState is not null)
-            silencers.Add(("the driver's idle RAM", local.ValuesIn(idleState, driverRam)));
-        silencers.Add(("the driver's RAM cleared", driverRam.Select(a => (a, (byte)0)).ToList()));
-
-        foreach (var (name, pokes) in silencers)
-        {
-            var rebased = Applied(ctx with { Rebase = pokes });
-            if (pokes.Count > 1 && !(bool)pool.Map("silent", rebased, new JsonNode?[] { null })[0]!)
-            {
-                log($"  {name} does not silence the music; skipped");
-                continue;
-            }
-            var resweep = Sweep(rebased, rebased.Guarded);
-            if (resweep.Sum(a => a.Responses.Count) * 2 < responding)
-            {
-                log($"  {name} silences by breaking the driver " +
-                    $"({string.Join(", ", resweep.Select(r => $"{r.Address:X4}: {r.Responses.Count}"))}); skipped");
-                continue;
-            }
-            var stillPlaying = pool.Map("silent", rebased, sample).Count(n => !(bool)n!);
-            if (sample.Count > 0 && stillPlaying * 10 < sample.Count)
-            {
-                log($"  {name} silences everything that follows (a pause flag?); skipped");
-                continue;
-            }
-
-            Rebased = name;
-            log($"rebased on silence: {name}");
-            Addresses = resweep.Concat(Addresses.Where(a => !rebased.Guarded.Contains(a.Address))).ToList();
-            return (rebased, resweep.Where(a => a.Responses.Count > 0).ToList());
-        }
+            fallback.Add(("the driver's idle RAM", local.ValuesIn(idleState, driverRam), null));
+        fallback.Add(("the driver's RAM cleared", driverRam.Select(a => (a, (byte)0)).ToList(), null));
+        if (TrySilencers(fallback) is { } slow)
+            return slow;
 
         log("nothing silences the music; effects are isolated by differential capture");
         return (Applied(ctx with { Rebase = null }), triggers);
+    }
+
+    private static int StopPriority(byte value) => value switch
+    {
+        0xFF => 0,
+        0xFE => 1,
+        0x80 => 2,
+        0x00 => 3,
+        _ => 4,
+    };
+
+    // Silencing music also silences false channel-state triggers that only
+    // responded while music played (DuckTales $037A..$03D7), so for a
+    // single-byte stop command the driver is alive if the silencing trigger
+    // (or its next ring-buffer slot) keeps responding. Multi-byte RAM resets
+    // keep the stricter total-response check.
+    private static bool DriverAlive(ushort? source, List<AddressReport> original, List<AddressReport> surviving)
+    {
+        if (surviving.Count == 0)
+            return false;
+        if (surviving.Sum(a => a.Responses.Count) * 2 >= original.Sum(a => a.Responses.Count))
+            return true;
+        if (source is not { } addr)
+            return false;
+        var originalAddresses = original.Select(t => t.Address).ToHashSet();
+        var orig = original.First(t => t.Address == addr);
+        bool Matches(AddressReport next) =>
+            next.Address == orig.Address
+            || !originalAddresses.Contains(next.Address) && orig.Consumers.Intersect(next.Consumers).Any();
+        return surviving.Where(Matches).Sum(s => s.Responses.Count) * 2 >= orig.Responses.Count;
+    }
+
+    private static List<ConsumerRule> ConsumersOf(IEnumerable<AddressReport> triggers) =>
+        triggers.SelectMany(t => t.Consumers.Select(pc => new ConsumerRule(t.Address, pc, t.BaseValue)))
+            .Distinct().ToList();
+
+    private static List<JsonNode?> SampleOf(List<AddressReport> triggers)
+    {
+        var all = triggers.SelectMany(t => t.Responses.Select(r => (t.Address, r.Value))).ToList();
+        return all.Where((_, i) => i % Math.Max(1, all.Count / 32) == 0)
+            .Select(t => (JsonNode?)ProberOps.Request(t.Address, t.Value)).ToList();
     }
 
     private List<Sound> Capture(ProbeContext ctx, List<AddressReport> triggers)

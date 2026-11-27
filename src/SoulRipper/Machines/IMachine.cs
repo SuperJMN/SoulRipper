@@ -29,4 +29,9 @@ internal interface IMachine : IDisposable
     byte Peek(ushort address);
     void Poke(ushort address, byte value);
     bool IsWorkRam(ushort address);
+
+    // Active subroutine calls on the CPU stack, innermost first: each entry is
+    // the call instruction's address and its jump target. Used to find a
+    // banked sound driver's fixed-bank dispatcher.
+    IEnumerable<(ushort CallSite, ushort Target)> CallStack() => Array.Empty<(ushort, ushort)>();
 }

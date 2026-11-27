@@ -76,6 +76,17 @@ Dream Land (GB); Super Mario Bros. 1 and 3, Mega Man 2, Zelda (NES).
   and the wActiveJingle `$D360` the driver copies it to (and the same for
   wave and noise): 305 effect files and 41 jingles are now 156 and 37.
   Zelda (NES) gives the same files as before.
+- Banked sound drivers with direct fixed-bank dispatchers and sentinel
+  ring-buffer queues (DuckTales): `Analyze` walks the CPU call stack to
+  include RAM read near direct external calls into the driver (bank-switch
+  trampolines and count-indexed buffers like Mega Man 2 remain separate);
+  `Probe` requires an idle reference value for `Restored` and records
+  per-address consumer rules so fixed-bank dispatchers can clear guarded
+  queues during isolation; `RebaseOnSilence` tries common stop values first
+  and follows ring-buffer slot advances (`00C9` → `00CA` after `00C9 = FF`).
+  DuckTales now rips cleanly in 3.0 min: 11 music (all main themes looped
+  and named), 4 jingles, 36 sfx instead of 1859 silent 0.02 s channel-pitch
+  artifacts.
 - Emulator libraries published to NuGet (`Zafiro.GameBoy.Debug.Emulator`,
   `Zafiro.Nes.Debug.Emulator`); public repository; Fleet project; first
   release (0.1.0, tagged).

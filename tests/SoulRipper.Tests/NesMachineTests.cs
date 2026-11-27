@@ -44,6 +44,22 @@ public class NesMachineTests
         Assert.False(nes.Audible);
     }
 
+    [Fact]
+    public void CallStack_finds_an_active_jsr_return_address()
+    {
+        using var nes = new NesMachine(CallingDriverRom());
+        (ushort CallSite, ushort Target)[] observed = Array.Empty<(ushort, ushort)>();
+        nes.Write = (a, _, _) =>
+        {
+            if (a == 0x4001 && observed.Length == 0)
+                observed = nes.CallStack().ToArray();
+        };
+
+        nes.RunFrames(1);
+
+        Assert.Contains(((ushort)0xC002, (ushort)0xC010), observed);
+    }
+
     // Pulse 1 at full constant volume with its length counter halted: it
     // plays until something stops it.
     private static void StartPulseNote(NesMachine nes)
@@ -63,6 +79,20 @@ public class NesMachineTests
         new byte[] { 0x78, 0xD8, 0x4C, 0x02, 0xC0 }.CopyTo(prg, 0);
         // NMI, RESET and IRQ vectors.
         new byte[] { 0x02, 0xC0, 0x00, 0xC0, 0x02, 0xC0 }.CopyTo(prg, 0x3FFA);
+        return header.Concat(prg).Concat(new byte[0x2000]).ToArray();
+    }
+
+    // NROM cartridge whose RESET calls a subroutine at $C010 that writes $4001.
+    private static byte[] CallingDriverRom()
+    {
+        var header = new byte[] { 0x4E, 0x45, 0x53, 0x1A, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        var prg = new byte[0x4000];
+        // $C000: SEI; CLD; JSR $C010; loop: JMP loop
+        new byte[] { 0x78, 0xD8, 0x20, 0x10, 0xC0, 0x4C, 0x05, 0xC0 }.CopyTo(prg, 0);
+        // $C010: LDA #$08; STA $4001; RTS
+        new byte[] { 0xA9, 0x08, 0x8D, 0x01, 0x40, 0x60 }.CopyTo(prg, 0x10);
+        // NMI, RESET and IRQ vectors.
+        new byte[] { 0x05, 0xC0, 0x00, 0xC0, 0x05, 0xC0 }.CopyTo(prg, 0x3FFA);
         return header.Concat(prg).Concat(new byte[0x2000]).ToArray();
     }
 }

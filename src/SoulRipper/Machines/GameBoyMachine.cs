@@ -96,6 +96,28 @@ internal sealed class GameBoyMachine : IMachine
     // Cartridge RAM, work RAM and HRAM (games keep sound queues in all three).
     public bool IsWorkRam(ushort address) => address is >= 0xA000 and < 0xE000 or >= 0xFF80 and < 0xFFFF;
 
+    // SM83 CALL / CALL cc pushes (callSite + 3) in little-endian; only ROM and
+    // RAM code ranges are peeked so hardware registers are never touched.
+    public IEnumerable<(ushort CallSite, ushort Target)> CallStack()
+    {
+        var calls = new List<(ushort, ushort)>();
+        var sp = StackPointer;
+        var limit = Math.Min(0xFFFE, sp + 64);
+        for (var s = sp; s < limit; s++)
+        {
+            var ret = (ushort)(Peek((ushort)s) | (Peek((ushort)(s + 1)) << 8));
+            if (ret < 3) continue;
+            var site = (ushort)(ret - 3);
+            if (!IsCodeAddress(site)) continue;
+            if (Peek(site) is not (0xCD or 0xC4 or 0xCC or 0xD4 or 0xDC)) continue;
+            var target = (ushort)(Peek((ushort)(site + 1)) | (Peek((ushort)(site + 2)) << 8));
+            calls.Add((site, target));
+        }
+        return calls;
+    }
+
+    private static bool IsCodeAddress(ushort a) => a is < 0x7FFD or >= 0xC000 and < 0xDFFD;
+
     public void Dispose()
     {
         gameboy.Mmu.WriteObserver = null;

@@ -145,6 +145,26 @@ internal sealed class NesMachine : IMachine
     // Internal RAM (minus the stack page) and cartridge work RAM.
     public bool IsWorkRam(ushort address) => address is < 0x0100 or >= 0x0200 and < 0x0800 or >= 0x6000 and < 0x8000;
 
+    // 6502 JSR pushes (callSite + 2) leaving it little-endian on the stack;
+    // only code ranges are peeked so PPU/APU registers ($2000-$5FFF) are never
+    // side-effected.
+    public IEnumerable<(ushort CallSite, ushort Target)> CallStack()
+    {
+        var calls = new List<(ushort, ushort)>();
+        for (var s = StackPointer + 1; s < 0x01FF; s++)
+        {
+            var ret = (ushort)(Peek((ushort)s) | (Peek((ushort)(s + 1)) << 8));
+            if (ret < 2) continue;
+            var site = (ushort)(ret - 2);
+            if (!IsCodeAddress(site) || Peek(site) != 0x20) continue;
+            var target = (ushort)(Peek((ushort)(site + 1)) | (Peek((ushort)(site + 2)) << 8));
+            calls.Add((site, target));
+        }
+        return calls;
+    }
+
+    private static bool IsCodeAddress(ushort a) => a is >= 0x8000 and <= 0xFFFD or < 0x07FE or >= 0x6000 and < 0x7FFE;
+
     public void Dispose()
     {
         NesCore.DebugSetMemoryObservers(null, null);

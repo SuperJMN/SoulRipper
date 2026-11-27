@@ -7,6 +7,9 @@ internal sealed class DiscoverySettings
     public int AnalysisFrames { get; init; } = 90;
     public int ProbeFrames { get; init; } = 8;
     public int DriverWindow { get; init; } = 0x1000;
+    public int CallerWindow { get; init; } = 0x80;
+    public int ReadsNearWindow { get; init; } = 0x20;
+    public int ReadsNearFrames { get; init; } = 4;
     public int MaxCandidates { get; init; } = 768;
     public int ReferenceFrames { get; init; } = 900;
     public int MaxFrames { get; init; } = 60 * 240;
@@ -21,11 +24,12 @@ internal sealed record Analysis(ushort[] ApuPcs, int MinSp, int MaxSp, List<usho
 
 internal sealed record Response(byte Value, ulong Signature, bool Consumed, bool Restored);
 
-internal sealed record AddressReport(ushort Address, byte BaseValue, List<Response> Responses)
+internal sealed record AddressReport(ushort Address, byte BaseValue, List<Response> Responses, ushort[]? ConsumerPcs = null)
 {
     public int Consumed => Responses.Count(r => r.Consumed);
     public int Restored => Responses.Count(r => r.Restored);
     public int Distinct => Responses.Select(r => r.Signature).Distinct().Count();
+    public ushort[] Consumers => ConsumerPcs ?? Array.Empty<ushort>();
 
     // A sound request byte is read by the driver and then cleared or rewritten
     // by it, unlike channel state, which responds to pokes but keeps them.
@@ -85,11 +89,16 @@ internal sealed record Sound(
     }
 }
 
+// A PC authorized to clear a guarded request byte back to its idle value
+// (e.g. a fixed-bank dispatcher consuming a ring-buffer slot).
+internal sealed record ConsumerRule(ushort Address, ushort Pc, byte IdleValue);
+
 // Everything a prober needs to rebuild the same base state and run the same
 // experiments as any other prober (in this or a worker process).
 internal sealed record ProbeContext(
     ushort[] ApuPcs, int MinSp, int MaxSp, ushort[] Guarded,
-    IReadOnlyList<(ushort Address, byte Value)>? Rebase, Dictionary<ushort, byte> Frozen, ulong BaseChecksum);
+    IReadOnlyList<(ushort Address, byte Value)>? Rebase, Dictionary<ushort, byte> Frozen, ulong BaseChecksum,
+    IReadOnlyList<ConsumerRule>? Consumers = null);
 
 // Runs sound experiments on one machine: from a base state, poke a byte and
 // watch what the sound chip does.
@@ -103,6 +112,7 @@ internal sealed class Prober
     private object baseState;
     private ProbeContext ctx = new(Array.Empty<ushort>(), 0xFFFF, 0, Array.Empty<ushort>(), null, new(), 0);
     private HashSet<ushort> guarded = new();
+    private HashSet<(ushort Address, ushort Pc, byte IdleValue)> consumers = new();
     private readonly Dictionary<ushort, byte> guardValues = new();
     private (Timeline Timeline, ushort[] StateRam, bool Silent)? reference;
     private bool guarding;
@@ -127,6 +137,8 @@ internal sealed class Prober
         // runs unfrozen.
         ctx = context with { Frozen = new() };
         guarded = context.Guarded.ToHashSet();
+        consumers = (context.Consumers ?? Array.Empty<ConsumerRule>())
+            .Select(r => (r.Address, r.Pc, r.IdleValue)).ToHashSet();
         reference = null;
         baseState = reachState;
         if (context.Rebase is { } pokes)
@@ -144,17 +156,35 @@ internal sealed class Prober
 
     // ---- analysis -----------------------------------------------------------
     // Locates the sound driver (code that writes the sound chip) and the RAM it
-    // reads: the candidates for sound request bytes.
+    // reads: the candidates for sound request bytes. When the driver lives in a
+    // switchable bank (DuckTales, Capcom UNROM/MMC1), its request dispatcher
+    // runs in the fixed bank right next to the call into the driver, so RAM
+    // read near those external call sites is included too.
     public Analysis Analyze()
     {
         var pcs = new HashSet<ushort>();
+        var callers = new HashSet<ushort>();
+        var seenStacks = new HashSet<(ushort Pc, ushort Sp)>();
         var readers = new Dictionary<ushort, HashSet<ushort>>();
         int minSp = 0xFFFF, maxSp = 0;
 
         m.LoadState(baseState);
         Observed((a, _, pc) =>
         {
-            if (m.Chip.Owns(a)) pcs.Add(pc);
+            if (!m.Chip.Owns(a)) return;
+            pcs.Add(pc);
+            if (!seenStacks.Add((pc, m.StackPointer))) return;
+            var current = pc;
+            foreach (var (site, target) in m.CallStack())
+            {
+                if (Math.Abs(target - current) > s.DriverWindow) continue;
+                if (Math.Abs(site - current) > s.DriverWindow)
+                {
+                    callers.Add(site);
+                    break;
+                }
+                current = site;
+            }
         }, (a, pc) =>
         {
             // Skip instruction fetches of code running from RAM.
@@ -170,22 +200,33 @@ internal sealed class Prober
         });
 
         ctx = ctx with { ApuPcs = pcs.Order().ToArray(), MinSp = minSp, MaxSp = maxSp };
-        var candidates = readers
+        var callerPcs = callers.Order().ToArray();
+        // Driver-read bytes come first so caller-window bytes (often in zero
+        // page) never push real driver candidates past MaxCandidates.
+        var inDriver = readers
             .Where(r => OffStack(r.Key) && (ctx.ApuPcs.Length == 0 || r.Value.Any(InDriver)))
-            .Select(r => r.Key).Order().Take(s.MaxCandidates).ToList();
+            .Select(r => r.Key).Order();
+        var nearCaller = ctx.ApuPcs.Length == 0
+            ? Enumerable.Empty<ushort>()
+            : readers
+                .Where(r => OffStack(r.Key) && !r.Value.Any(InDriver) && r.Value.Any(pc => Near(callerPcs, pc, s.CallerWindow)))
+                .Select(r => r.Key).Order();
+        var candidates = inDriver.Concat(nearCaller).Take(s.MaxCandidates).Order().ToList();
         return new Analysis(ctx.ApuPcs, minSp, maxSp, candidates);
     }
 
     private bool OffStack(ushort a) => a < ctx.MinSp - 0x40 || a > ctx.MaxSp + 0x08;
 
-    private bool InDriver(ushort pc)
+    private bool InDriver(ushort pc) => Near(ctx.ApuPcs, pc, s.DriverWindow);
+
+    private static bool Near(ushort[] sorted, ushort pc, int window)
     {
-        var pcs = ctx.ApuPcs;
-        var i = Array.BinarySearch(pcs, pc);
+        if (sorted.Length == 0) return false;
+        var i = Array.BinarySearch(sorted, pc);
         if (i >= 0) return true;
         i = ~i;
-        return i < pcs.Length && pcs[i] - pc <= s.DriverWindow
-               || i > 0 && pc - pcs[i - 1] <= s.DriverWindow;
+        return i < sorted.Length && sorted[i] - pc <= window
+               || i > 0 && pc - sorted[i - 1] <= window;
     }
 
     private static void Add(Dictionary<ushort, HashSet<ushort>> map, ushort key, ushort pc)
@@ -211,25 +252,36 @@ internal sealed class Prober
         foreach (var c in candidates)
         {
             var baseValue = baseValues[c];
+            var consumerPcs = new HashSet<ushort>();
             var responses = ProbeValues.Where(v => v != baseValue)
-                .Select(v => Probe(c, v, probeReference, refValues[c])).OfType<Response>().ToList();
+                .Select(v => Probe(c, v, baseValue, probeReference, refValues[c], consumerPcs)).OfType<Response>().ToList();
             if (responses.Count > 0)
             {
                 foreach (var v in Enumerable.Range(0, 256).Select(x => (byte)x))
                     if (v != baseValue && !ProbeValues.Contains(v) && (v != 0 || baseValue != 0)
-                        && Probe(c, v, probeReference, refValues[c]) is { } r)
+                        && Probe(c, v, baseValue, probeReference, refValues[c], consumerPcs) is { } r)
                         responses.Add(r);
                 responses = responses.OrderBy(r => r.Value).ToList();
             }
-            reports.Add(new AddressReport(c, baseValue, responses));
+            reports.Add(new AddressReport(c, baseValue, responses, consumerPcs.Order().ToArray()));
         }
         return reports;
     }
 
-    private Response? Probe(ushort address, byte value, Timeline probeReference, byte[] refValues)
+    private Response? Probe(ushort address, byte value, byte baseValue, Timeline probeReference, byte[] refValues, HashSet<ushort> consumerPcs)
     {
         var values = new byte[s.ProbeFrames];
+        var settle = Math.Min(4, values.Length);
+        var writers = new HashSet<ushort>();
+        var frame = 0;
+        var previous = m.Write;
         Timeline t;
+        m.Write = (a, v, pc) =>
+        {
+            previous?.Invoke(a, v, pc);
+            if (a == address && frame < settle && v != value && v == baseValue && refValues[frame] == baseValue)
+                writers.Add(pc);
+        };
         try
         {
             m.LoadState(baseState);
@@ -237,12 +289,17 @@ internal sealed class Prober
             t = Recorder.Record(m, s.ProbeFrames, f =>
             {
                 values[f] = m.Peek(address);
+                frame = f + 1;
                 return true;
             });
         }
         catch (Exception)
         {
             return null;   // the poke crashed the machine
+        }
+        finally
+        {
+            m.Write = previous;
         }
 
         var signature = 17UL;
@@ -256,10 +313,31 @@ internal sealed class Prober
         if (!differs)
             return null;
 
-        var settle = Math.Min(4, values.Length);
+        consumerPcs.UnionWith(writers);
         var consumed = values.Take(settle).Any(v => v != value);
-        var restored = Enumerable.Range(0, settle).Any(f => values[f] != value && values[f] == refValues[f]);
+        // Only counts as restored when the reference itself held the idle base
+        // value: channel pitch bytes that change on their own during music
+        // (DuckTales $037A) are overwritten with the next note, not consumed.
+        var restored = Enumerable.Range(0, settle).Any(f => values[f] != value && values[f] == baseValue && refValues[f] == baseValue);
         return new Response(value, signature, consumed, restored);
+    }
+
+    // Work RAM bytes read near `pcs` in the current base state. After rebasing
+    // a ring-buffer queue (DuckTales $C8-$CF), consuming the stop command
+    // advances the read index so the dispatcher now reads the next slot.
+    public List<ushort> ReadsNear(IReadOnlyList<ushort> pcs)
+    {
+        if (pcs.Count == 0) return new();
+        var sorted = pcs.Distinct().Order().ToArray();
+        var reads = new HashSet<ushort>();
+        m.LoadState(baseState);
+        Observed(OnWrite, (a, pc) =>
+        {
+            if (m.IsWorkRam(a) && OffStack(a) && (a < pc || a > pc + 3) && Near(sorted, pc, s.ReadsNearWindow))
+                reads.Add(a);
+        }, () => Isolated(() => m.RunFrames(s.ReadsNearFrames)));
+        m.LoadState(baseState);
+        return reads.Order().ToList();
     }
 
     // Work RAM the driver reads or writes while it plays: its state. Code
@@ -387,7 +465,7 @@ internal sealed class Prober
     {
         if (!guarding || poking || !guarded.Contains(address))
             return;
-        if (InDriver(pc))
+        if (InDriver(pc) || consumers.Contains((address, pc, value)))
         {
             guardValues[address] = value;
             return;

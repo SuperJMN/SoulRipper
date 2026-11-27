@@ -19,4 +19,33 @@ public class WireTests
             new[] { "120:EA80:55D5AA", "180:8000:12" },
             decoded.Samples!.Select(s => $"{s.Frame}:{s.Address:X4}:{Convert.ToHexString(s.Data)}"));
     }
+
+    [Fact]
+    public void Consumer_rules_cross_the_worker_boundary()
+    {
+        var rule = new ConsumerRule(0x00C9, 0xC11B, 0x88);
+        var ctx = new ProbeContext(new ushort[] { 0x823F }, 0x01F0, 0x01FF, new ushort[] { 0x00C9 },
+            null, new(), 12345UL, new[] { rule });
+        var report = new AddressReport(0x00C9, 0x88, new() { new Response(0x01, 42UL, true, true) }, new ushort[] { 0xC11B });
+
+        var decodedCtx = Wire.DecodeContext(JsonNode.Parse(Wire.Encode(ctx).ToJsonString())!);
+        var decodedReport = Wire.DecodeAddress(JsonNode.Parse(Wire.Encode(report).ToJsonString())!);
+
+        Assert.Equal(new[] { rule }, decodedCtx.Consumers);
+        Assert.Equal(new ushort[] { 0xC11B }, decodedReport.Consumers);
+    }
+
+    [Fact]
+    public void Wire_decodes_older_payloads_without_consumer_fields()
+    {
+        var ctxJson = JsonNode.Parse(
+            """{"apu_pcs":[33343],"min_sp":496,"max_sp":511,"guarded":[201],"rebase":null,"frozen":[],"checksum":"0"}""")!;
+        var addrJson = JsonNode.Parse("""{"a":201,"base":136,"r":[]}""")!;
+
+        var ctx = Wire.DecodeContext(ctxJson);
+        var report = Wire.DecodeAddress(addrJson);
+
+        Assert.Empty(ctx.Consumers!);
+        Assert.Empty(report.Consumers);
+    }
 }

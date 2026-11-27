@@ -12,6 +12,8 @@ internal static class Wire
         ["min_sp"] = c.MinSp,
         ["max_sp"] = c.MaxSp,
         ["guarded"] = Ints(c.Guarded.Select(x => (int)x)),
+        ["consumers"] = new JsonArray((c.Consumers ?? Array.Empty<ConsumerRule>())
+            .Select(r => (JsonNode)Ints(new[] { (int)r.Address, r.Pc, r.IdleValue })).ToArray()),
         ["rebase"] = c.Rebase is { } pokes
             ? new JsonArray(pokes.Select(p => (JsonNode)Ints(new[] { (int)p.Address, p.Value })).ToArray())
             : null,
@@ -22,6 +24,8 @@ internal static class Wire
     public static ProbeContext DecodeContext(JsonNode n)
     {
         var rebase = n["rebase"]?.AsArray();
+        var consumers = n["consumers"]?.AsArray()
+            .Select(r => new ConsumerRule((ushort)(int)r![0]!, (ushort)(int)r[1]!, (byte)(int)r[2]!)).ToList();
         return new ProbeContext(
             UShorts(n["apu_pcs"]!),
             (int)n["min_sp"]!,
@@ -29,7 +33,8 @@ internal static class Wire
             UShorts(n["guarded"]!),
             rebase?.Select(p => ((ushort)(int)p![0]!, (byte)(int)p[1]!)).ToList(),
             n["frozen"]!.AsArray().ToDictionary(p => (ushort)(int)p![0]!, p => (byte)(int)p![1]!),
-            ulong.Parse((string)n["checksum"]!));
+            ulong.Parse((string)n["checksum"]!),
+            consumers ?? new List<ConsumerRule>());
     }
 
     public static JsonObject Encode(AddressReport r) => new()
@@ -38,13 +43,15 @@ internal static class Wire
         ["base"] = r.BaseValue,
         ["r"] = new JsonArray(r.Responses.Select(x => (JsonNode)new JsonArray(
             x.Value, x.Signature.ToString(), x.Consumed, x.Restored)).ToArray()),
+        ["c"] = Ints(r.Consumers.Select(x => (int)x)),
     };
 
     public static AddressReport DecodeAddress(JsonNode n) => new(
         (ushort)(int)n["a"]!,
         (byte)(int)n["base"]!,
         n["r"]!.AsArray().Select(x => new Response(
-            (byte)(int)x![0]!, ulong.Parse((string)x[1]!), (bool)x[2]!, (bool)x[3]!)).ToList());
+            (byte)(int)x![0]!, ulong.Parse((string)x[1]!), (bool)x[2]!, (bool)x[3]!)).ToList(),
+        n["c"] is { } c ? UShorts(c) : Array.Empty<ushort>());
 
     public static JsonObject Encode(Sound s) => new()
     {

@@ -122,6 +122,22 @@ Dream Land (GB); Super Mario Bros. 1 and 3, Mega Man 2, Zelda (NES).
   `TrackPairing.PairByMelody` falls back to PAL/NTSC clock-scaled semitone
   matching so PAL ROMs pair with NTSC VGM packs (Mr. Gimmick gets 18 of
   20 vgmrips.net track names).
+- Native PAL NES (RP2A07, 50 Hz) support (`Zafiro.Nes.Debug.Emulator`
+  0.0.14): auto-detects PAL ROMs from NES 2.0 byte 12, clean iNES 1.0
+  byte 9, or regional title/filename tags (overridable via `--region
+  ntsc|pal`), runs AprNes in `RegionType.PAL` across orchestrator and
+  workers, writes VGM headers with the RP2A07 clock (`1662607` Hz), 50 Hz
+  rate and exact 50.0070 fps frame waits, bisects game-owned RAM when
+  freezing alters a non-uniform per-frame driver entry cadence so only
+  actual tempo dividers (Mr. Gimmick's 5/4 divider `$0060`) stay unfrozen
+  while adjacent game counters remain frozen, and confirms state loops
+  against the flat write stream within ±1 frame so double-tick phase
+  shifts do not break loop detection when a track's tick period is not a
+  multiple of the divider numerator. Mr. Gimmick (Europe) now rips in
+  2.7 min in tune at true 5/4 PAL tempo (17/17 looped music, 5 jingles,
+  85 sfx, 19 of 20 vgmrips.net names matched), with NTSC regressions
+  checked on SMB1 (1.7 min, 88.7 s overworld / 12.6 s underground) and
+  Zelda (1.4 min, 5 music, 3 jingles, 29 sfx, all 15 names).
 - Emulator libraries published to NuGet (`Zafiro.GameBoy.Debug.Emulator`,
   `Zafiro.Nes.Debug.Emulator`); public repository; Fleet project; first
   release (0.1.0, tagged).

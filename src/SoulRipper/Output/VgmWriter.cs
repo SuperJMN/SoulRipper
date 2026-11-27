@@ -14,19 +14,20 @@ internal static class VgmWriter
     public const int SampleRate = 44100;
     private const int Header = 0x100;
 
-    private sealed record Chip(int Clock, int ClockOffset, byte Command, ushort RegisterBase, double FramesPerSecond, (ushort, byte)[] Silence);
+    private sealed record Chip(int Clock, int ClockOffset, byte Command, ushort RegisterBase, double FramesPerSecond, int Rate, (ushort, byte)[] Silence);
 
-    private static readonly Chip Nes = new(1789772, 0x84, 0xB4, 0x4000, 60.0, new (ushort, byte)[] { (0x4015, 0x00) });
-    private static readonly Chip GameBoy = new(4194304, 0x80, 0xB3, 0xFF10, 4194304.0 / 70224, new (ushort, byte)[] { (0xFF26, 0x00) });
+    private static readonly Chip Nes = new(1789772, 0x84, 0xB4, 0x4000, 60.0, 60, new (ushort, byte)[] { (0x4015, 0x00) });
+    private static readonly Chip NesPal = new(1662607, 0x84, 0xB4, 0x4000, 1662607.0 / 33247.5, 50, new (ushort, byte)[] { (0x4015, 0x00) });
+    private static readonly Chip GameBoy = new(4194304, 0x80, 0xB3, 0xFF10, 4194304.0 / 70224, 60, new (ushort, byte)[] { (0xFF26, 0x00) });
 
     // `init` restores the chip state the capture started in. With
     // `loopStart`, frames loopStart..frames-1 loop forever; otherwise the chip
     // is silenced and a short tail appended. Returns the length in samples.
     public static byte[] Encode(string system, IEnumerable<(ushort Address, byte Value)> init,
         IReadOnlyList<(int Frame, ushort Address, byte Value)> writes, int frames, int? loopStart, Gd3 gd3, int tailFrames = 3,
-        IReadOnlyList<(int Frame, ushort Address, byte[] Data)>? samples = null)
+        IReadOnlyList<(int Frame, ushort Address, byte[] Data)>? samples = null, bool pal = false)
     {
-        var chip = system == "gb" ? GameBoy : Nes;
+        var chip = system == "gb" ? GameBoy : pal ? NesPal : Nes;
         var byFrame = writes.ToLookup(w => w.Frame);
         var samplesByFrame = (samples ?? Array.Empty<(int, ushort, byte[])>()).ToLookup(b => b.Frame);
         var data = new List<byte>();
@@ -93,7 +94,7 @@ internal static class VgmWriter
             Put(0x1C, Header + lo - 0x1C);
             Put(0x20, totalSamples - loopSamples);
         }
-        Put(0x24, 60);
+        Put(0x24, chip.Rate);
         Put(0x34, Header - 0x34);
         Put(chip.ClockOffset, chip.Clock);
         data.CopyTo(file, Header);

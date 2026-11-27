@@ -4,11 +4,16 @@ namespace SoulRipper.Machines;
 // register drives, and which writes (re)start a note.
 internal sealed class SoundChip
 {
-    public static readonly SoundChip Nes = new(
+    public static readonly SoundChip Nes = CreateNes(1789772.0 / 29780.5, isPal: false);
+
+    public static readonly SoundChip NesPal = CreateNes(1662607.0 / 33247.5, isPal: true);
+
+    private static SoundChip CreateNes(double fps, bool isPal) => new(
         name: "nes",
         baseAddress: 0x4000,
         length: 0x18,
-        fps: 1789772.0 / 29780.5,
+        fps: fps,
+        isPal: isPal,
         channelOf: a => a switch
         {
             >= 0x4000 and <= 0x4003 => 0,   // pulse 1
@@ -35,6 +40,7 @@ internal sealed class SoundChip
         baseAddress: 0xFF10,
         length: 0x30,
         fps: 4194304.0 / 70224,
+        isPal: false,
         channelOf: a => a switch
         {
             >= 0xFF10 and <= 0xFF14 => 0,   // square 1 (sweep)
@@ -57,7 +63,7 @@ internal sealed class SoundChip
     private readonly Func<ushort, bool> isRegister;
     private readonly Func<ushort, byte, byte[], (ushort Address, int Length)?> sampleStart;
 
-    private SoundChip(string name, ushort baseAddress, int length, double fps,
+    private SoundChip(string name, ushort baseAddress, int length, double fps, bool isPal,
         Func<ushort, int> channelOf, Func<ushort, bool> isTrigger, Func<ushort, bool> isRegister,
         ushort[] initFirst, Func<ushort, byte, byte[], (ushort Address, int Length)?> sampleStart)
     {
@@ -65,6 +71,7 @@ internal sealed class SoundChip
         BaseAddress = baseAddress;
         Length = length;
         FramesPerSecond = fps;
+        IsPal = isPal;
         this.channelOf = channelOf;
         this.isTrigger = isTrigger;
         this.isRegister = isRegister;
@@ -76,6 +83,7 @@ internal sealed class SoundChip
     public ushort BaseAddress { get; }
     public int Length { get; }
     public double FramesPerSecond { get; }
+    public bool IsPal { get; }
     public IReadOnlyList<ushort> InitFirst { get; }
 
     public bool Owns(ushort address) => address >= BaseAddress && address < BaseAddress + Length && isRegister(address);

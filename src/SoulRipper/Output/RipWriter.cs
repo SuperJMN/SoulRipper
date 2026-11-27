@@ -47,7 +47,7 @@ internal static class RipWriter
                     : $"Ripped by SoulRipper: request 0x{s.Address:X4} = 0x{s.Value:X2}");
             var path = Path.Combine(outDir, file);
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            var vgm = VgmWriter.Encode(rip.System, s.Init, s.Writes, s.Frames, s.LoopStart, gd3, samples: s.Samples);
+            var vgm = VgmWriter.Encode(rip.System, s.Init, s.Writes, s.Frames, s.LoopStart, gd3, samples: s.Samples, pal: rip.Pal);
             using (var stream = File.Create(path))
             using (Stream output = compress ? new GZipStream(stream, CompressionLevel.SmallestSize) : stream)
                 output.Write(vgm);
@@ -121,4 +121,4 @@ internal static class RipWriter
 
 // What to write: the sounds discovery found, and about which game.
 internal sealed record RipResult(string Game, string System, double FramesPerSecond, Reach Reach,
-    IReadOnlyList<Sound> Sounds, string Author = "", string Date = "");
+    IReadOnlyList<Sound> Sounds, string Author = "", string Date = "", bool Pal = false);

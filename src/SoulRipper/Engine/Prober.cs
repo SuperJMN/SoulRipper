@@ -556,17 +556,122 @@ internal sealed class Prober
     // The game's clock is frozen for captures: the RAM that game code (not the
     // driver) writes is put back to its base value after every frame, so
     // attract-mode, level and death timers never fire while the driver plays.
+    // PAL tempo dividers (Mr. Gimmick's 5/4 divider $0060) live in game NMI
+    // code too: when freezing game RAM changes a non-uniform per-frame driver
+    // entry cadence (or stops a divided driver), bisect to leave only the
+    // byte(s) controlling that cadence unfrozen.
     public Dictionary<ushort, byte> GameOwnedRam()
     {
         var gameOwned = new HashSet<ushort>();
         m.LoadState(baseState);
         Observed((a, _, pc) =>
         {
-            if (m.IsWorkRam(a) && !InDriver(pc) && OffStack(a) && !guarded.Contains(a)) gameOwned.Add(a);
+            if (m.IsWorkRam(a) && !InDriver(pc) && OffStack(a) && !guarded.Contains(a))
+                gameOwned.Add(a);
         }, null, () => Isolated(() => m.RunFrames(300)));
 
         m.LoadState(baseState);
-        return gameOwned.Order().ToDictionary(a => a, m.Peek);
+        var frozen = gameOwned.Order().ToDictionary(a => a, m.Peek);
+        if (frozen.Count > 0 && ctx.ApuPcs.Length > 0)
+        {
+            UnfreezeCadenceBytes(frozen);
+            m.LoadState(baseState);
+        }
+        return frozen;
+    }
+
+    private void UnfreezeCadenceBytes(Dictionary<ushort, byte> frozen)
+    {
+        // 24 frames cover 6 full cycles of a 5/4 divider and nearly 5 of 6/5,
+        // short enough that attract-mode timers never fire yet long enough to
+        // separate uniform 1x/frame drivers from fractional PAL dividers.
+        const int frames = 24;
+        var unfrozen = DriverCadence(new(), frames);
+        if (unfrozen.Total == 0 || unfrozen.Min == unfrozen.Max)
+            return;
+        var allFrozen = DriverCadence(frozen, frames);
+        if (allFrozen.Total == unfrozen.Total)
+            return;
+        // Prefer staying frozen when a lag frame occurs (min == 0 while freezing
+        // prevents the lag): only unfreeze bytes when the driver runs every frame
+        // with extra divider ticks (min >= 1) or freezing stops the driver.
+        if (unfrozen.Min == 0 && allFrozen.Total > 0)
+            return;
+
+        var keepers = new HashSet<ushort>();
+        FindCadenceBytes(frozen.Keys.ToList(), frozen, unfrozen.Total, frames, keepers);
+        foreach (var a in keepers)
+            frozen.Remove(a);
+    }
+
+    private void FindCadenceBytes(List<ushort> candidates, Dictionary<ushort, byte> all, int target,
+        int frames, HashSet<ushort> keepers)
+    {
+        // Tempo dividers need at most a couple of bytes; cap at 4 so a noisy
+        // driver can never unfreeze wide swaths of game RAM.
+        if (candidates.Count == 0 || keepers.Count >= 4)
+            return;
+        if (candidates.Count == 1)
+        {
+            var a = candidates[0];
+            if (DriverCadence(new Dictionary<ushort, byte> { [a] = all[a] }, frames).Total != target)
+                keepers.Add(a);
+            return;
+        }
+        var mid = candidates.Count / 2;
+        var left = candidates.GetRange(0, mid);
+        var right = candidates.GetRange(mid, candidates.Count - mid);
+        if (DriverCadence(left.ToDictionary(a => a, a => all[a]), frames).Total != target)
+            FindCadenceBytes(left, all, target, frames, keepers);
+        if (DriverCadence(right.ToDictionary(a => a, a => all[a]), frames).Total != target)
+            FindCadenceBytes(right, all, target, frames, keepers);
+    }
+
+    // Counts transitions from non-driver code into the driver over `frames`
+    // frames with `frozen` restored at each frame end.
+    private (int Total, int Min, int Max) DriverCadence(Dictionary<ushort, byte> frozen, int frames)
+    {
+        var savedFrozen = ctx.Frozen;
+        ctx = ctx with { Frozen = frozen };
+        var total = 0;
+        var min = int.MaxValue;
+        var max = int.MinValue;
+        var frameEntries = 0;
+        var inDriver = false;
+
+        void Track(ushort pc)
+        {
+            var now = InDriver(pc);
+            if (now && !inDriver) frameEntries++;
+            inDriver = now;
+        }
+
+        var prevFrameEnded = m.FrameEnded;
+        m.FrameEnded = () =>
+        {
+            total += frameEntries;
+            if (frameEntries < min) min = frameEntries;
+            if (frameEntries > max) max = frameEntries;
+            frameEntries = 0;
+            inDriver = false;
+            prevFrameEnded?.Invoke();
+        };
+
+        try
+        {
+            m.LoadState(baseState);
+            Observed((a, v, pc) =>
+            {
+                OnWrite(a, v, pc);
+                if (!poking) Track(pc);
+            }, (_, pc) => Track(pc), () => Isolated(() => m.RunFrames(frames)));
+        }
+        finally
+        {
+            m.FrameEnded = prevFrameEnded;
+            ctx = ctx with { Frozen = savedFrozen };
+        }
+        return (total, min, max);
     }
 
     // While isolated, the game's own writes to the request bytes are undone so
@@ -727,11 +832,13 @@ internal sealed class Prober
         var active = new List<int>();             // running count of frames with new writes
         var states = new Dictionary<(ulong, ulong), int>();
         var hashes = new List<ulong>();
+        var flatWrites = new List<(ushort Address, byte Value)>();
+        var frameWriteEnd = new List<int>();      // flatWrites.Count after each frame
         var lastActive = -1;
         var lastAudible = -1;
         var end = "max";
         int? loopStart = null, loopFrames = null;
-        (int Start, int Length, int Until)? pending = null;   // loop awaiting confirmation
+        (int Start, int Length, int Until, int Cursor)? pending = null;   // loop awaiting confirmation
 
         // A request that crashes the machine must not leave the sample observer
         // chained for the next capture of this prober.
@@ -744,6 +851,10 @@ internal sealed class Prober
             {
                 if (f == 0 && callWrites.Count > 0)
                     timeline.Frames[0].InsertRange(0, callWrites);
+                var frameWrites = timeline.Frames[f];
+                var curWriteStart = flatWrites.Count;
+                flatWrites.AddRange(frameWrites);
+                frameWriteEnd.Add(flatWrites.Count);
                 var diff = timeline.DiffFrame(f, refTimeline);
                 diffs.Add(diff);
                 hashes.Add(timeline.FrameHash(f));
@@ -768,10 +879,27 @@ internal sealed class Prober
                 }
 
                 // Once the sound's state repeats, so should its writes: a repeat is
-                // confirmed by the writes matching one period back for a while.
-                if (pending is var (ls, ll, until))
+                // confirmed by the write stream matching one period back for a while.
+                // Checking the flat stream within +/-1 frame of f - ll handles both
+                // frame-aligned drivers and PAL tempo dividers (5/4, 6/5) that double-
+                // tick on shifted frames when a song's tick period is not a multiple
+                // of the divider numerator (Mr. Gimmick Stage 2, 5, 6, Boss 1).
+                if (pending is var (ls, ll, until, cursor))
                 {
-                    if (hashes[f] != hashes[f - ll])
+                    var ok = true;
+                    foreach (var w in frameWrites)
+                    {
+                        if (cursor >= curWriteStart || flatWrites[cursor] != w)
+                        {
+                            ok = false;
+                            break;
+                        }
+                        cursor++;
+                    }
+                    var refFrame = f - ll;
+                    var minEnd = refFrame > 0 ? frameWriteEnd[refFrame - 1] : 0;
+                    var maxEnd = frameWriteEnd[Math.Min(refFrame + 1, f - 1)];
+                    if (!ok || cursor < minEnd || cursor > maxEnd)
                         pending = null;
                     else if (f >= until)
                     {
@@ -780,14 +908,19 @@ internal sealed class Prober
                         end = "loop";
                         return false;
                     }
+                    else
+                    {
+                        pending = (ls, ll, until, cursor);
+                    }
                 }
                 else if (stateRam.Length > 0)
                 {
                     var key = SoundState(stateRam);
                     if (!states.TryAdd(key, f) && active[f] - active[states[key]] > 0)
                     {
-                        var length = f - states[key];
-                        pending = (states[key] + 1, length, f + Math.Min(Math.Max(length, 120), 600));
+                        var prev = states[key];
+                        var length = f - prev;
+                        pending = (prev + 1, length, f + Math.Min(Math.Max(length, 120), 600), frameWriteEnd[prev]);
                         states[key] = f;
                     }
                 }

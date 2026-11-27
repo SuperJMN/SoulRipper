@@ -88,6 +88,56 @@ public class NesMachineTests
         Assert.True(nes.Peek(0x0051) > nmiBefore);
     }
 
+    [Fact]
+    public void DetectPal_checks_nes2_header_ines1_flag_and_regional_title_tags()
+    {
+        byte[] Header(byte b7, byte b9, byte b12) =>
+            new byte[] { 0x4E, 0x45, 0x53, 0x1A, 1, 1, 0, b7, 0, b9, 0, 0, b12, 0, 0, 0 };
+
+        // Explicit NES 2.0 timing byte wins over title tags; timing 2 (multi) falls back.
+        Assert.True(NesMachine.DetectPal(Header(0x08, 0, 1), "Game (USA).nes"));
+        Assert.False(NesMachine.DetectPal(Header(0x08, 0, 0), "Mr. Gimmick (Europe).nes"));
+        Assert.True(NesMachine.DetectPal(Header(0x08, 0, 2), "Game (Europe).nes"));
+        // Clean iNES 1.0 byte 9 bit 0 marks PAL; dirty trailing bytes ("DiskDude!") are ignored.
+        Assert.True(NesMachine.DetectPal(Header(0x00, 1, 0), "game.nes"));
+        var dirty = Header(0x00, 1, (byte)'!');
+        Assert.False(NesMachine.DetectPal(dirty, "game.nes"));
+        // Short / non-iNES buffers fall back to title tags safely.
+        Assert.True(NesMachine.DetectPal(Array.Empty<byte>(), "Mr. Gimmick (E).nes"));
+        Assert.False(NesMachine.DetectPal(Array.Empty<byte>(), "Mr. Gimmick (UE).nes"));
+        // iNES 1.0 byte 9 == 0 falls back to European title tags (Mr. Gimmick).
+        Assert.True(NesMachine.DetectPal(Header(0x00, 0, 0), "Mr. Gimmick (Europe).nes"));
+        Assert.False(NesMachine.DetectPal(Header(0x00, 0, 0), "Journey to Silius (USA).nes"));
+        Assert.False(NesMachine.DetectPal(Header(0x00, 0, 0), "Super Mario Bros. (World).nes"));
+        Assert.False(NesMachine.DetectPal(Header(0x00, 0, 0), "Legend of Zelda (USA, Europe).nes"));
+    }
+
+    [Fact]
+    public void Pal_machine_runs_with_rp2a07_timing_replays_savestates_and_switches_back_to_ntsc()
+    {
+        using (var pal = new NesMachine(IdleRom(), pal: true))
+        {
+            Assert.Same(SoundChip.NesPal, pal.Chip);
+            Assert.True(pal.Chip.IsPal);
+            Assert.Equal(AprNes.NesCore.RegionType.PAL, AprNes.NesCore.Region);
+
+            pal.RunFrames(2);
+            var state = pal.SaveState();
+            StartPulseNote(pal);
+            pal.RunFrames(1);
+            Assert.True(pal.Audible);
+
+            pal.LoadState(state);
+            pal.RunFrames(1);
+            Assert.False(pal.Audible);
+        }
+
+        using var ntsc = new NesMachine(IdleRom(), pal: false);
+        Assert.Same(SoundChip.Nes, ntsc.Chip);
+        Assert.False(ntsc.Chip.IsPal);
+        Assert.Equal(AprNes.NesCore.RegionType.NTSC, AprNes.NesCore.Region);
+    }
+
     // Pulse 1 at full constant volume with its length counter halted: it
     // plays until something stops it.
     private static void StartPulseNote(NesMachine nes)

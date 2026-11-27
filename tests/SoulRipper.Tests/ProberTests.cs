@@ -491,6 +491,71 @@ public class ProberTests
     }
 
     [Fact]
+    public void GameOwnedRam_keeps_tempo_divider_unfrozen_while_freezing_adjacent_game_counters()
+    {
+        // Models Mr. Gimmick's PAL 5/4 tempo divider ($0060 at $EA92/$EAA9)
+        // alongside an unrelated game frame counter ($0061) written right next
+        // to JSR $8009 (only 4 bytes away) and an NMI timer ($00ED). Only the
+        // byte whose freezing alters per-frame driver entry cadence stays live.
+        var machine = new FakeMachine { Stack = new[] { ((ushort)0xEA9E, (ushort)0x8009) } };
+        machine.OnFrame = (m, f) =>
+        {
+            m.BusWrite(0x00ED, (byte)f, 0xEA67);                          // NMI timer -> freeze
+            m.BusWrite(0x0061, (byte)(m.Peek(0x0061) + 1), 0xEA9A);       // adjacent counter (4 bytes from JSR) -> freeze
+            var div = (byte)(m.Peek(0x0060) + 1);
+            m.BusWrite(0x0060, div, 0xEA92);                              // PAL 5/4 divider -> keep live
+            m.BusWrite(0x4002, 0x20, 0x849E);                             // 1st driver call
+            if (m.BusRead(0x0060, 0xEAA1) >= 4)
+            {
+                m.BusWrite(0x0060, 0, 0xEAA9);
+                m.BusWrite(0x4002, 0x21, 0x849E);                         // 2nd driver call on every 4th frame
+            }
+        };
+
+        var prober = new Prober(machine, machine.SaveState(), new DiscoverySettings { AnalysisFrames = 8 });
+        var analysis = prober.Analyze();
+        prober.Apply(new ProbeContext(analysis.ApuPcs, analysis.MinSp, analysis.MaxSp,
+            Array.Empty<ushort>(), null, new(), 0, DriverBanks: analysis.DriverBanks));
+
+        var frozen = prober.GameOwnedRam();
+
+        Assert.True(frozen.ContainsKey(0x00ED));
+        Assert.True(frozen.ContainsKey(0x0061));
+        Assert.False(frozen.ContainsKey(0x0060));
+    }
+
+    [Fact]
+    public void GameOwnedRam_keeps_all_game_counters_frozen_when_driver_cadence_is_uniform_or_lagging()
+    {
+        // Uniform 1x/frame NTSC driver: adjacent game counter stays frozen.
+        var uniform = new FakeMachine { Stack = new[] { ((ushort)0xEA9E, (ushort)0x8009) } };
+        uniform.OnFrame = (m, f) =>
+        {
+            m.BusWrite(0x0061, (byte)f, 0xEA9A);
+            m.BusWrite(0x4002, 0x20, 0x849E);
+        };
+        var p1 = new Prober(uniform, uniform.SaveState(), new DiscoverySettings { AnalysisFrames = 6 });
+        var a1 = p1.Analyze();
+        p1.Apply(new ProbeContext(a1.ApuPcs, a1.MinSp, a1.MaxSp, Array.Empty<ushort>(), null, new(), 0, DriverBanks: a1.DriverBanks));
+        Assert.True(p1.GameOwnedRam().ContainsKey(0x0061));
+
+        // Lag frame triggered by game timer (min == 0, freezing prevents lag):
+        // conservative guard keeps the timer frozen rather than unfreezing it.
+        var lagging = new FakeMachine { Stack = new[] { ((ushort)0xEA9E, (ushort)0x8009) } };
+        lagging.OnFrame = (m, _) =>
+        {
+            var t = (byte)(m.Peek(0x0050) + 1);
+            m.BusWrite(0x0050, t, 0xEA67);
+            if (t == 10) return; // one lag frame skips the driver
+            m.BusWrite(0x4002, 0x20, 0x849E);
+        };
+        var p2 = new Prober(lagging, lagging.SaveState(), new DiscoverySettings { AnalysisFrames = 6 });
+        var a2 = p2.Analyze();
+        p2.Apply(new ProbeContext(a2.ApuPcs, a2.MinSp, a2.MaxSp, Array.Empty<ushort>(), null, new(), 0, DriverBanks: a2.DriverBanks));
+        Assert.True(p2.GameOwnedRam().ContainsKey(0x0050));
+    }
+
+    [Fact]
     public void Discovery_caps_slow_silence_probes_and_tries_routines_before_unsilenced_ram_capture()
     {
         // Models Sunsoft drivers (Journey to Silius): multiple channel-state
@@ -632,6 +697,172 @@ public class ProberTests
         Assert.Equal("F2A3 = FF", discovery.Rebased);
         Assert.Equal(new[] { "F2A3_01", "F2A3_02" }, sounds.Select(s => s.Id).Order().ToArray());
         Assert.All(sounds, s => Assert.Equal("music", s.Kind));
+    }
+
+    [Fact]
+    public void Capture_confirms_single_loop_under_pal_5_4_tempo_divider_when_tick_period_is_not_divisible_by_5()
+    {
+        // Models Mr. Gimmick PAL: fixed-bank NMI runs the sound driver 5 times
+        // every 4 frames via $0060. A song with a 64-tick loop (64 % 5 = 4)
+        // repeats driver RAM after 51 frames (~51.2 frames), while the 4-frame
+        // double-tick cadence shifts phase so per-frame write hashes differ.
+        var machine = new FakeMachine();
+        machine.OnFrame = (m, _) =>
+        {
+            var div = (byte)(m.Peek(0x0060) + 1);
+            m.BusWrite(0x0060, div, 0xEA92);
+            var ticks = div >= 4 ? 2 : 1;
+            if (div >= 4) m.BusWrite(0x0060, 0, 0xEAA9);
+
+            var active = m.Peek(0x0300);
+            m.Audible = active != 0;
+            if (active == 0)
+                return;
+
+            var step = m.Peek(0x0301);
+            for (var t = 0; t < ticks; t++)
+            {
+                m.BusWrite(0x4002, (byte)(0x20 + step), 0x849E);
+                m.BusWrite(0x4006, (byte)(0x80 + (step & 0x0F)), 0x84BA);
+                step = (byte)((step + 1) % 64);
+            }
+            m.BusWrite(0x0301, step, 0x8200);
+        };
+
+        var settings = new DiscoverySettings
+        {
+            ReferenceFrames = 16,
+            MaxFrames = 260,
+            QuietFrames = 20,
+            MusicMinFrames = 30,
+        };
+        var prober = new Prober(machine, machine.SaveState(), settings);
+
+        var sound = prober.Capture(0x0300, 0x01);
+
+        Assert.Equal("loop", sound.End);
+        Assert.Equal("music", sound.Kind);
+        // 64 ticks at 5/4 ticks/frame = 51.2 frames -> 51-frame loop (not 5x = 256 frames / max).
+        Assert.InRange(sound.LoopFrames!.Value, 51, 52);
+    }
+
+    [Fact]
+    public void Capture_rejects_false_state_repeat_when_write_stream_diverges()
+    {
+        // Models a song whose static RAM repeats once mid-track (A-B-A-C) before
+        // diverging into a different write stream: pending confirmation must cancel.
+        var machine = new FakeMachine();
+        machine.OnFrame = (m, f) =>
+        {
+            // Keep $0302 changing during reference so it is excluded from stateRam.
+            m.BusWrite(0x0302, (byte)(f & 0xFF), 0x8100);
+            var active = m.Peek(0x0300);
+            m.Audible = active != 0;
+            if (active == 0)
+                return;
+
+            // Driver state $0301 repeats every 40 frames, but writes change after frame 50.
+            m.BusWrite(0x0301, (byte)(f % 40), 0x8200);
+            var pitch = f < 50 ? (byte)(0x10 + (f % 40)) : (byte)(0x90 + (f % 73));
+            m.BusWrite(0x4002, pitch, 0x849E);
+            m.BusWrite(0x4006, (byte)(0x40 + (f % 5)), 0x84BA);
+        };
+
+        var settings = new DiscoverySettings
+        {
+            ReferenceFrames = 16,
+            MaxFrames = 220,
+            QuietFrames = 20,
+            MusicMinFrames = 30,
+        };
+        var prober = new Prober(machine, machine.SaveState(), settings);
+
+        var sound = prober.Capture(0x0300, 0x01);
+
+        Assert.Equal("max", sound.End);
+        Assert.Null(sound.LoopFrames);
+    }
+
+    [Fact]
+    public void Capture_rejects_false_state_repeat_when_write_stream_drifts_past_one_frame()
+    {
+        // Emits the exact same write sequence on the second pass, but at half
+        // speed (every other frame): the cursor falls >1 frame behind f - ll,
+        // so the +/-1 frame drift bound must cancel pending confirmation.
+        var machine = new FakeMachine();
+        machine.OnFrame = (m, f) =>
+        {
+            m.BusWrite(0x0302, (byte)(f & 0xFF), 0x8100);
+            var active = m.Peek(0x0300);
+            m.Audible = active != 0;
+            if (active == 0)
+                return;
+
+            // State repeats at frame 40 (matching frame 0), then emits the same
+            // write sequence at half tempo so cursor lags by >1 frame within 4 frames.
+            m.BusWrite(0x0301, f <= 40 ? (byte)(f % 40) : (byte)(100 + (f & 0x7F)), 0x8200);
+            if (f <= 40)
+            {
+                m.BusWrite(0x4002, (byte)(0x20 + f), 0x849E);
+                m.BusWrite(0x4006, (byte)(0x80 + (f & 0x0F)), 0x84BA);
+            }
+            else if ((f - 40) % 2 == 1)
+            {
+                var step = (f - 40 + 1) / 2;
+                m.BusWrite(0x4002, (byte)(0x20 + step), 0x849E);
+                m.BusWrite(0x4006, (byte)(0x80 + (step & 0x0F)), 0x84BA);
+            }
+        };
+
+        var settings = new DiscoverySettings
+        {
+            ReferenceFrames = 16,
+            MaxFrames = 200,
+            QuietFrames = 20,
+            MusicMinFrames = 30,
+        };
+        var prober = new Prober(machine, machine.SaveState(), settings);
+
+        var sound = prober.Capture(0x0300, 0x01);
+
+        Assert.Equal("max", sound.End);
+        Assert.Null(sound.LoopFrames);
+    }
+
+    [Theory]
+    [InlineData(10, 40)] // standard frame-aligned intro + loop
+    [InlineData(0, 1)]   // ll == 1 boundary (clamped maxEnd = f - 1)
+    [InlineData(3, 2)]   // ll == 2 boundary
+    public void Capture_confirms_exact_loop_start_and_length_for_frame_aligned_loops(int intro, int period)
+    {
+        var machine = new FakeMachine();
+        machine.OnFrame = (m, f) =>
+        {
+            var active = m.Peek(0x0300);
+            m.Audible = active != 0;
+            if (active == 0)
+                return;
+
+            var state = f < intro ? f : intro + ((f - intro) % period);
+            m.BusWrite(0x0301, (byte)state, 0x8200);
+            m.BusWrite(0x4002, (byte)(0x20 + state), 0x849E);
+            m.BusWrite(0x4006, (byte)(0x80 + (state & 0x0F)), 0x84BA);
+        };
+
+        var settings = new DiscoverySettings
+        {
+            ReferenceFrames = 16,
+            MaxFrames = 260,
+            QuietFrames = 20,
+            MusicMinFrames = 30,
+        };
+        var prober = new Prober(machine, machine.SaveState(), settings);
+
+        var sound = prober.Capture(0x0300, 0x01);
+
+        Assert.Equal("loop", sound.End);
+        Assert.Equal(intro + 1, sound.LoopStart);
+        Assert.Equal(period, sound.LoopFrames);
     }
 
     private sealed class SpyPool(IWorkPool inner) : IWorkPool

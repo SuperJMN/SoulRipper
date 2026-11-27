@@ -76,11 +76,11 @@ internal sealed class ProcessPool : IWorkPool
     private readonly List<Worker> workers;
     private int respawns;
 
-    public ProcessPool(int count, string rom, Reach reach, DiscoverySettings s)
+    public ProcessPool(int count, string rom, Reach reach, DiscoverySettings s, bool pal)
     {
         var reachJson = System.Text.Json.JsonSerializer.Serialize(reach.ToJson());
         workers = Enumerable.Range(0, count)
-            .Select(_ => new Worker(this, rom, reachJson, s.MaxFrames)).ToList();
+            .Select(_ => new Worker(this, rom, reachJson, s.MaxFrames, pal)).ToList();
     }
 
     public List<JsonNode?> Map(string op, ProbeContext ctx, IReadOnlyList<JsonNode?> items, Action<int, JsonNode?>? done = null)
@@ -122,15 +122,17 @@ internal sealed class ProcessPool : IWorkPool
         private readonly string rom;
         private readonly string reachJson;
         private readonly int maxFrames;
+        private readonly bool pal;
         private ConcurrentQueue<string> stderrTail = new();
         private Process process = null!;
 
-        public Worker(ProcessPool pool, string rom, string reachJson, int maxFrames)
+        public Worker(ProcessPool pool, string rom, string reachJson, int maxFrames, bool pal)
         {
             this.pool = pool;
             this.rom = rom;
             this.reachJson = reachJson;
             this.maxFrames = maxFrames;
+            this.pal = pal;
             Start();
         }
 
@@ -151,6 +153,11 @@ internal sealed class ProcessPool : IWorkPool
                 info.ArgumentList.Add(dll);
             foreach (var arg in new[] { "worker", "--rom", rom, "--reach", reachJson, "--max-frames", maxFrames.ToString() })
                 info.ArgumentList.Add(arg);
+            if (pal)
+            {
+                info.ArgumentList.Add("--region");
+                info.ArgumentList.Add("pal");
+            }
 
             process = Process.Start(info)!;
             process.ErrorDataReceived += (_, e) =>

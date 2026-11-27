@@ -30,4 +30,20 @@ public class VgmWriterTests
         var loop = 0x1C + BinaryPrimitives.ReadInt32LittleEndian(vgm.AsSpan(0x1C));
         Assert.Equal(KickBlock, vgm[loop..(loop + KickBlock.Length)]);
     }
+
+    [Fact]
+    public void Pal_nes_writes_rp2a07_clock_50hz_rate_and_pal_frame_waits()
+    {
+        var vgm = VgmWriter.Encode("nes", [], Writes, frames: 2, loopStart: 1, Tag, tailFrames: 0, pal: true);
+
+        Assert.Equal(1662607, BinaryPrimitives.ReadInt32LittleEndian(vgm.AsSpan(0x84)));
+        Assert.Equal(50, BinaryPrimitives.ReadInt32LittleEndian(vgm.AsSpan(0x24)));
+        var totalSamples = BinaryPrimitives.ReadInt32LittleEndian(vgm.AsSpan(0x18));
+        var loopOffset = BinaryPrimitives.ReadInt32LittleEndian(vgm.AsSpan(0x1C));
+        var loopSamples = BinaryPrimitives.ReadInt32LittleEndian(vgm.AsSpan(0x20));
+        // 2 frames at 50.0070 fps (~881.88 samples/frame) = 1764 total, 882 in loop.
+        Assert.InRange(totalSamples, 1762, 1766);
+        Assert.True(loopOffset > 0);
+        Assert.InRange(loopSamples, 881, 883);
+    }
 }

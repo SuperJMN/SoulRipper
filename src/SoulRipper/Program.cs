@@ -52,6 +52,7 @@ internal static class Program
               --max-seconds S    longest capture per sound (default 240)
               --keep-suspect     also write sounds past the game's valid IDs
               --vgm              write uncompressed .vgm instead of .vgz
+              --region R         NES TV timing: ntsc or pal (default: auto-detect)
               --offline          do not look the game up online
               --jobs N           worker processes (default: cores - 1)
 
@@ -90,9 +91,10 @@ internal static class Program
 
         var outDir = Path.GetFullPath(opt.Get("out") ?? RipWriter.SafeFileName(game));
         Directory.CreateDirectory(outDir);
-        Console.WriteLine($"{game} [{rom.SystemId}]: discovering sounds (this takes a few minutes)...");
+        var pal = ResolvePal(rom.Path, rom.SystemId, opt, hints.Game ?? rom.Name);
+        Console.WriteLine($"{game} [{rom.SystemId}{(pal ? "/pal" : "")}]: discovering sounds (this takes a few minutes)...");
         var sw = Stopwatch.StartNew();
-        var (sounds, reach, fps, _) = RunDiscovery(rom.Path, opt, profile.Reach, null, hints.Queues.Concat(profile.Queues).Distinct().ToList());
+        var (sounds, reach, fps, _) = RunDiscovery(rom.Path, opt, profile.Reach, null, hints.Queues.Concat(profile.Queues).Distinct().ToList(), pal);
 
         var names = hints.Names(sounds);
         if (names.Count > 0)
@@ -100,7 +102,7 @@ internal static class Program
         foreach (var (id, name) in profile.Names())
             names[id] = name;
 
-        var rip = new RipResult(game, rom.SystemId, fps, reach, sounds, profile.Author, profile.Date);
+        var rip = new RipResult(game, rom.SystemId, fps, reach, sounds, profile.Author, profile.Date, pal);
         var entries = RipWriter.Write(rip, outDir, names, opt.Flag("keep-suspect"), hints.KnownRequests, compress: !opt.Flag("vgm"));
         PrintSummary(entries, outDir, sw.Elapsed);
         return 0;
@@ -122,10 +124,11 @@ internal static class Program
     {
         using var rom = RomFile.Open(RomArgument(opt));
         var sw = Stopwatch.StartNew();
+        var pal = ResolvePal(rom.Path, rom.SystemId, opt, rom.Name);
         var reach = opt.Get("profile") is { } path ? Profile.Load(path).Reach : null;
         var (sounds, usedReach, _, discovery) = RunDiscovery(rom.Path, opt, reach,
-            Options.Addresses(opt.Get("queues")), Options.Addresses(opt.Get("extra")) ?? new List<ushort>());
-        using (var m = OpenMachine(rom.Path))
+            Options.Addresses(opt.Get("queues")), Options.Addresses(opt.Get("extra")) ?? new List<ushort>(), pal);
+        using (var m = OpenMachine(rom.Path, pal))
             Report.Write(opt.Req("out"), rom.Name, m, usedReach, discovery, sounds);
         Log($"{sounds.Count} sounds ({string.Join(", ", sounds.GroupBy(x => x.Kind).Select(g => $"{g.Count()} {g.Key}"))}) " +
             $"in {sw.Elapsed.TotalSeconds:F0}s -> {opt.Req("out")}");
@@ -133,9 +136,9 @@ internal static class Program
     }
 
     private static (List<Sound> Sounds, Reach Reach, double Fps, Discovery Discovery) RunDiscovery(
-        string rom, Options opt, Reach? reach, IReadOnlyList<ushort>? queues, IReadOnlyList<ushort> extra)
+        string rom, Options opt, Reach? reach, IReadOnlyList<ushort>? queues, IReadOnlyList<ushort> extra, bool pal)
     {
-        using var m = OpenMachine(rom);
+        using var m = OpenMachine(rom, pal);
         var (active, idle) = ReachFor(m, reach, opt.Int("boot", Reach.Default.Boot));
         var settings = new DiscoverySettings
         {
@@ -157,7 +160,7 @@ internal static class Program
         {
             m.LoadState(state);
             var prober = new Prober(m, state, settings);
-            using IWorkPool pool = jobs > 1 ? new ProcessPool(jobs, rom, attemptReach, settings) : new LocalPool(prober);
+            using IWorkPool pool = jobs > 1 ? new ProcessPool(jobs, rom, attemptReach, settings, pal) : new LocalPool(prober);
             var discovery = new Discovery(prober, pool, settings, Log);
             var sounds = discovery.Run(queues, extra, analysis, idle?.State);
             if (sounds.Count > 0 || state == activeState)
@@ -170,7 +173,9 @@ internal static class Program
     // Measures emulation speed and checks that savestates replay identically.
     private static int Bench(Options opt)
     {
-        using var m = OpenMachine(RomArgument(opt));
+        using var rom = RomFile.Open(RomArgument(opt));
+        var pal = ResolvePal(rom.Path, rom.SystemId, opt, rom.Name);
+        using var m = OpenMachine(rom.Path, pal);
         var frames = opt.Int("frames", 600);
         var apuWrites = 0;
         m.Write = (a, _, _) => { if (m.Chip.Owns(a)) apuWrites++; };
@@ -178,7 +183,7 @@ internal static class Program
         var sw = Stopwatch.StartNew();
         m.RunFrames(frames);
         var fps = frames / sw.Elapsed.TotalSeconds;
-        Console.WriteLine($"{m.Chip.Name}: {frames} frames in {sw.Elapsed.TotalSeconds:F2}s = {fps:F0} fps, {apuWrites} APU writes");
+        Console.WriteLine($"{m.Chip.Name}{(pal ? "/pal" : "")}: {frames} frames in {sw.Elapsed.TotalSeconds:F2}s = {fps:F0} fps, {apuWrites} APU writes");
 
         sw.Restart();
         var state = m.SaveState();
@@ -199,7 +204,8 @@ internal static class Program
         var protocol = new StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true };
         Console.SetOut(Console.Error);   // cores print diagnostics on stdout
 
-        using var m = OpenMachine(opt.Req("rom"));
+        var pal = string.Equals(opt.Get("region"), "pal", StringComparison.OrdinalIgnoreCase);
+        using var m = OpenMachine(opt.Req("rom"), pal);
         using (var doc = System.Text.Json.JsonDocument.Parse(opt.Req("reach")))
             Reach.FromJson(doc.RootElement).Apply(m);
         var prober = new Prober(m, m.SaveState(), new DiscoverySettings { MaxFrames = opt.Int("max-frames", 60 * 240) });
@@ -237,7 +243,8 @@ internal static class Program
     private static int Access(Options opt)
     {
         using var rom = RomFile.Open(RomArgument(opt));
-        using var m = OpenMachine(rom.Path);
+        var pal = ResolvePal(rom.Path, rom.SystemId, opt, rom.Name);
+        using var m = OpenMachine(rom.Path, pal);
         _ = ReachFor(m, opt.Get("profile") is { } path ? Profile.Load(path).Reach : null, opt.Int("boot", Reach.Default.Boot));
         var targets = Options.Addresses(opt.Req("addr"))!.ToHashSet();
         var hits = new SortedDictionary<(ushort Address, string Kind, ushort Pc), int>();
@@ -305,10 +312,21 @@ internal static class Program
         return writes;
     }
 
-    internal static IMachine OpenMachine(string rom) =>
+    private static bool ResolvePal(string romPath, string systemId, Options opt, string? titleOrName)
+    {
+        if (opt.Get("region") is { } region)
+        {
+            if (region.Equals("pal", StringComparison.OrdinalIgnoreCase)) return systemId == "nes";
+            if (region.Equals("ntsc", StringComparison.OrdinalIgnoreCase)) return false;
+            throw new ArgumentException($"unknown --region '{region}' (expected ntsc or pal)");
+        }
+        return systemId == "nes" && NesMachine.DetectPal(File.ReadAllBytes(romPath), titleOrName);
+    }
+
+    internal static IMachine OpenMachine(string rom, bool pal = false) =>
         Path.GetExtension(rom).ToLowerInvariant() switch
         {
-            ".nes" => new NesMachine(rom),
+            ".nes" => new NesMachine(rom, pal),
             ".gb" or ".gbc" => new GameBoyMachine(rom),
             var ext => throw new ArgumentException($"unsupported ROM type: {ext}"),
         };

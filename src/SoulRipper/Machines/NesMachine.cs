@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Text.RegularExpressions;
 using AprNes;
 
 namespace SoulRipper.Machines;
@@ -16,7 +17,7 @@ internal sealed class NesMachine : IMachine
     // version of the core. A pointer carries no length, so a resized array
     // would be copied out of range without a word: check them before moving
     // to another version (the NES tests fail until then).
-    private static readonly Version ApuCheckedOn = new(0, 0, 13, 0);
+    private static readonly Version ApuCheckedOn = new(0, 0, 14, 0);
 
     // AprNes keeps the APU channels (timers, duty, volume, envelopes, sweeps,
     // length counters) in unmanaged arrays its savestate leaves out, so a loaded
@@ -60,16 +61,18 @@ internal sealed class NesMachine : IMachine
     }
 
     private readonly ushort[] routineCandidates;
+    private readonly bool pal;
     private Action<ushort, ushort>? read;
     private int min = int.MaxValue, max = int.MinValue;
 
-    public NesMachine(string romPath) : this(File.ReadAllBytes(romPath), romPath)
+    public NesMachine(string romPath, bool pal = false) : this(File.ReadAllBytes(romPath), romPath, pal)
     {
     }
 
-    public NesMachine(byte[] rom, string name = "ROM")
+    public NesMachine(byte[] rom, string name = "ROM", bool pal = false)
     {
-        if (!NesCore.DebugLoad(rom))
+        this.pal = pal;
+        if (!NesCore.DebugLoad(rom, pal ? NesCore.RegionType.PAL : NesCore.RegionType.NTSC))
             throw new InvalidOperationException($"AprNes rejected the ROM: {name}");
         routineCandidates = ScanRoutines(rom);
         NesCore.DebugSetMemoryObservers(OnWrite, null);
@@ -80,7 +83,38 @@ internal sealed class NesMachine : IMachine
         };
     }
 
-    public SoundChip Chip => SoundChip.Nes;
+    public SoundChip Chip => pal ? SoundChip.NesPal : SoundChip.Nes;
+
+    // Detects whether an iNES / NES 2.0 ROM targets PAL (RP2A07, 50 Hz):
+    // explicit NES 2.0 byte 12 wins; clean iNES 1.0 byte 9 bit 0 marks PAL,
+    // while 0 falls back to regional tags in the No-Intro/GoodNES title or
+    // filename because many European dumps leave byte 9 unset (Mr. Gimmick).
+    public static bool DetectPal(byte[] rom, string? titleOrPath = null)
+    {
+        if (rom.Length >= 16 && rom[0] == 'N' && rom[1] == 'E' && rom[2] == 'S' && rom[3] == 0x1A)
+        {
+            var format = rom[7] & 0x0C;
+            if (format == 0x08) // NES 2.0
+            {
+                var timing = rom[12] & 0x03;
+                if (timing == 1) return true;
+                if (timing == 0) return false;
+            }
+            else if (format == 0x00 && rom[12] == 0 && rom[13] == 0 && rom[14] == 0 && rom[15] == 0
+                     && (rom[9] & 0x01) != 0)
+            {
+                return true;
+            }
+        }
+        if (string.IsNullOrWhiteSpace(titleOrPath))
+            return false;
+        var tags = Regex.Matches(titleOrPath, @"\(([^)]+)\)").Select(m => m.Groups[1].Value).ToList();
+        if (tags.Any(t => Regex.IsMatch(t, @"\b(USA|Japan|World|NTSC|U|J|JU|UE)\b", RegexOptions.IgnoreCase)))
+            return false;
+        return tags.Any(t => Regex.IsMatch(t,
+            @"\b(Europe|PAL|Germany|France|Spain|Italy|Sweden|Netherlands|UK|Australia|Scandinavia|E|EU)\b",
+            RegexOptions.IgnoreCase));
+    }
     public Action<ushort, byte, ushort>? Write { get; set; }
     public ushort StackPointer => (ushort)(0x0100 | NesCore.DebugReadRegisters().Sp);
 

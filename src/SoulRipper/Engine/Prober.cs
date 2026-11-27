@@ -24,7 +24,7 @@ internal sealed record Analysis(ushort[] ApuPcs, int MinSp, int MaxSp, List<usho
 
 internal sealed record Response(byte Value, ulong Signature, bool Consumed, bool Restored);
 
-internal sealed record AddressReport(ushort Address, byte BaseValue, List<Response> Responses, ushort[]? ConsumerPcs = null)
+internal sealed record AddressReport(ushort Address, byte BaseValue, List<Response> Responses, ushort[]? ConsumerPcs = null, bool IsCall = false)
 {
     public int Consumed => Responses.Count(r => r.Consumed);
     public int Restored => Responses.Count(r => r.Restored);
@@ -35,14 +35,18 @@ internal sealed record AddressReport(ushort Address, byte BaseValue, List<Respon
     // by it, unlike channel state, which responds to pokes but keeps them.
     // Out-of-range IDs make many values respond alike, so only ratios count;
     // and a byte whose every value sounds the same is not choosing sounds.
-    public bool IsTrigger => Responses.Count > 0 && Consumed * 2 >= Responses.Count && Restored * 4 >= Responses.Count
-                             && (Distinct > 1 || Responses.Count == 1);
+    // A direct sound routine (Call) has no RAM byte to consume, so distinct
+    // chip responses while touching the driver suffice.
+    public bool IsTrigger => IsCall
+        ? Responses.Count > 0 && Distinct > 1
+        : Responses.Count > 0 && Consumed * 2 >= Responses.Count && Restored * 4 >= Responses.Count
+          && (Distinct > 1 || Responses.Count == 1);
 }
 
 internal sealed record Sound(
     ushort Address, byte Value, string Kind, string End, int Frames, int? LoopStart, int? LoopFrames,
     int[] Channels, ulong Hash, List<(ushort Address, byte Value)> Init, List<(int Frame, ushort Address, byte Value)> Writes,
-    List<(int Frame, ushort Address, byte[] Data)>? Samples = null)
+    List<(int Frame, ushort Address, byte[] Data)>? Samples = null, bool IsCall = false)
 {
     public string Id => $"{Address:X4}_{Value:X2}";
     public List<string> Aliases { get; } = new();
@@ -98,13 +102,14 @@ internal sealed record ConsumerRule(ushort Address, ushort Pc, byte IdleValue);
 internal sealed record ProbeContext(
     ushort[] ApuPcs, int MinSp, int MaxSp, ushort[] Guarded,
     IReadOnlyList<(ushort Address, byte Value)>? Rebase, Dictionary<ushort, byte> Frozen, ulong BaseChecksum,
-    IReadOnlyList<ConsumerRule>? Consumers = null);
+    IReadOnlyList<ConsumerRule>? Consumers = null, bool CallMode = false, ushort[]? DriverReads = null);
 
 // Runs sound experiments on one machine: from a base state, poke a byte and
 // watch what the sound chip does.
 internal sealed class Prober
 {
     private static readonly byte[] ProbeValues = { 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80 };
+    private static readonly byte[] CallProbeValues = { 0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0xFF };
 
     private readonly IMachine m;
     private readonly object reachState;
@@ -113,6 +118,7 @@ internal sealed class Prober
     private ProbeContext ctx = new(Array.Empty<ushort>(), 0xFFFF, 0, Array.Empty<ushort>(), null, new(), 0);
     private HashSet<ushort> guarded = new();
     private HashSet<(ushort Address, ushort Pc, byte IdleValue)> consumers = new();
+    private HashSet<ushort> driverReads = new();
     private readonly Dictionary<ushort, byte> guardValues = new();
     private (Timeline Timeline, ushort[] StateRam, bool Silent)? reference;
     private bool guarding;
@@ -139,13 +145,14 @@ internal sealed class Prober
         guarded = context.Guarded.ToHashSet();
         consumers = (context.Consumers ?? Array.Empty<ConsumerRule>())
             .Select(r => (r.Address, r.Pc, r.IdleValue)).ToHashSet();
+        driverReads = (context.DriverReads ?? Array.Empty<ushort>()).ToHashSet();
         reference = null;
         baseState = reachState;
         if (context.Rebase is { } pokes)
         {
             m.LoadState(reachState);
             foreach (var (address, value) in pokes)
-                Poke(address, value);
+                ApplyRequest(address, value);
             Isolated(() => m.RunFrames(120));
             baseState = m.SaveState();
         }
@@ -236,8 +243,12 @@ internal sealed class Prober
     }
 
     // ---- probe and sweep ------------------------------------------------------
-    // Pokes a few values into each byte and, if the sound chip reacts, all 256.
-    public List<AddressReport> Sweep(IReadOnlyList<ushort> candidates)
+    // Pokes a few values into each byte (or invokes each candidate routine in
+    // CallMode) and, if the sound chip reacts, tries all 256 values.
+    public List<AddressReport> Sweep(IReadOnlyList<ushort> candidates) =>
+        ctx.CallMode ? SweepRoutines(candidates) : SweepRam(candidates);
+
+    private List<AddressReport> SweepRam(IReadOnlyList<ushort> candidates)
     {
         m.LoadState(baseState);
         var baseValues = candidates.ToDictionary(c => c, m.Peek);
@@ -266,6 +277,90 @@ internal sealed class Prober
             reports.Add(new AddressReport(c, baseValue, responses, consumerPcs.Order().ToArray()));
         }
         return reports;
+    }
+
+    private List<AddressReport> SweepRoutines(IReadOnlyList<ushort> routines)
+    {
+        m.LoadState(baseState);
+        var probeReference = Recorder.Record(m, s.ProbeFrames);
+        var reports = new List<AddressReport>();
+        foreach (var r in routines)
+        {
+            var responses = CallProbeValues
+                .Select(v => ProbeCall(r, v, probeReference)).OfType<Response>().ToList();
+            if (responses.Count > 0)
+            {
+                foreach (var v in Enumerable.Range(0, 256).Select(x => (byte)x))
+                    if (!CallProbeValues.Contains(v) && ProbeCall(r, v, probeReference) is { } hit)
+                        responses.Add(hit);
+                responses = responses.OrderBy(x => x.Value).ToList();
+            }
+            reports.Add(new AddressReport(r, 0, responses, IsCall: true));
+        }
+        return reports;
+    }
+
+    private Response? ProbeCall(ushort address, byte value, Timeline probeReference)
+    {
+        Timeline t;
+        var calledDriver = false;
+        var touchedDriverRam = false;
+        var externalRamWrites = new HashSet<ushort>();
+        var callWrites = new List<(ushort Address, byte Value)>();
+        var previous = m.Write;
+        m.Write = (a, v, pc) =>
+        {
+            previous?.Invoke(a, v, pc);
+            if (m.Chip.Owns(a))
+                callWrites.Add((a, v));
+            if (InDriver(pc) || m.Chip.Owns(a))
+            {
+                calledDriver = true;
+                return;
+            }
+            if (m.IsWorkRam(a) && OffStack(a))
+            {
+                externalRamWrites.Add(a);
+                if (driverReads.Contains(a))
+                    touchedDriverRam = true;
+            }
+        };
+        try
+        {
+            m.LoadState(baseState);
+            var returned = m.Call(address, value);
+            m.Write = previous;
+            // Accept routines that either enter the sound driver directly
+            // without scribbling all over game WRAM (Kirby's Adventure $F826/
+            // $F859) or only write a handful of RAM bytes including one the
+            // driver/dispatcher reads (Mega Man 2 $C051 enqueue). Rejects game
+            // object spawners (Kirby $CB78/$CBA2) that write dozens of WRAM
+            // bytes even if the spawned object happens to trigger an SFX.
+            var maxExternal = calledDriver ? 16 : 8;
+            if (!returned || !(calledDriver || touchedDriverRam) || externalRamWrites.Count > maxExternal)
+                return null;
+            t = Recorder.Record(m, s.ProbeFrames);
+            if (callWrites.Count > 0 && t.Count > 0)
+                t.Frames[0].InsertRange(0, callWrites);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+        finally
+        {
+            m.Write = previous;
+        }
+
+        var signature = 17UL;
+        var differs = false;
+        for (var f = 0; f < t.Count; f++)
+        {
+            var h = t.FrameHash(f);
+            differs |= h != probeReference.FrameHash(f);
+            signature = signature * 31 + h;
+        }
+        return differs ? new Response(value, signature, true, true) : null;
     }
 
     private Response? Probe(ushort address, byte value, byte baseValue, Timeline probeReference, byte[] refValues, HashSet<ushort> consumerPcs)
@@ -375,7 +470,7 @@ internal sealed class Prober
         try
         {
             m.LoadState(baseState);
-            if (request is var (address, value)) Poke(address, value);
+            if (request is var (address, value)) ApplyRequest(address, value);
             var t = Isolated(() => Recorder.Record(m, to));
             // Drivers that run twice in some frames repeat their writes there.
             var first = t.Frames[from].ToHashSet();
@@ -443,6 +538,17 @@ internal sealed class Prober
         }
     }
 
+    private void ApplyRequest(ushort address, byte value)
+    {
+        if (ctx.CallMode)
+        {
+            if (!m.Call(address, value))
+                throw new InvalidOperationException($"sound routine 0x{address:X4}(0x{value:X2}) did not return");
+            return;
+        }
+        Poke(address, value);
+    }
+
     private void Poke(ushort address, byte value)
     {
         poking = true;
@@ -463,7 +569,9 @@ internal sealed class Prober
 
     private void OnWrite(ushort address, byte value, ushort pc)
     {
-        if (!guarding || poking || !guarded.Contains(address))
+        // In CallMode, `guarded` holds ROM subroutine addresses (which overlap
+        // cartridge MBC registers on GB), never RAM bytes to guard.
+        if (!guarding || poking || ctx.CallMode || !guarded.Contains(address))
             return;
         if (InDriver(pc) || consumers.Contains((address, pc, value)))
         {
@@ -514,9 +622,13 @@ internal sealed class Prober
         var (refTimeline, stateRam, refSilent) = Reference();
         m.LoadState(baseState);
         var init = m.Chip.InitWrites(m.ApuShadow);
-        Poke(address, value);
 
         var timeline = new Timeline();
+        // Any sound-chip writes made synchronously inside a direct routine call
+        // belong at the start of frame 0 (and DMC sample starts must be caught
+        // before ApplyRequest runs).
+        var callWrites = new List<(ushort Address, byte Value)>();
+        var inCall = false;
 
         // DMC samples play from cartridge memory, which a VGM player lacks:
         // keep the bytes each sample start points at, as banked at that moment.
@@ -527,8 +639,11 @@ internal sealed class Prober
         m.Write = (a, v, pc) =>
         {
             observer?.Invoke(a, v, pc);
+            if (inCall && m.Chip.Owns(a))
+                callWrites.Add((a, v));
             if (m.Chip.SampleStart(a, v, m.ApuShadow) is not { } sample)
                 return;
+            var sampleFrame = Math.Max(0, timeline.Count - 1);
             foreach (var (start, length) in SampleMemory.Ranges(sample.Address, sample.Length))
             {
                 // Drivers restart the same sample often: share its bytes.
@@ -536,7 +651,7 @@ internal sealed class Prober
                 if (last.TryGetValue(start, out var known) && known.AsSpan().SequenceEqual(data))
                     data = known;
                 last[start] = data;
-                played.Add((timeline.Count - 1, start, data));
+                played.Add((sampleFrame, start, data));
             }
         };
 
@@ -554,8 +669,13 @@ internal sealed class Prober
         // chained for the next capture of this prober.
         try
         {
+            inCall = ctx.CallMode;
+            ApplyRequest(address, value);
+            inCall = false;
             Isolated(() => Recorder.Extend(m, timeline, s.MaxFrames, f =>
             {
+                if (f == 0 && callWrites.Count > 0)
+                    timeline.Frames[0].InsertRange(0, callWrites);
                 var diff = timeline.DiffFrame(f, refTimeline);
                 diffs.Add(diff);
                 hashes.Add(timeline.FrameHash(f));
@@ -652,7 +772,7 @@ internal sealed class Prober
         var samples = SampleMemory.Blocks(played, frames, loopStart);
         var hash = Sound.HashOf(loopStart, writes, samples);
 
-        return new Sound(address, value, kind, end, frames, loopStart, loopFrames, channels, hash, init, writes, samples);
+        return new Sound(address, value, kind, end, frames, loopStart, loopFrames, channels, hash, init, writes, samples, ctx.CallMode);
     }
 
     private byte[] Read(ushort start, int length) =>

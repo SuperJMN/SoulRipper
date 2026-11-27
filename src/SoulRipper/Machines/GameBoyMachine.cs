@@ -1,5 +1,7 @@
+using System.Reflection;
 using CoreBoy;
 using CoreBoy.controller;
+using CoreBoy.cpu;
 using CoreBoy.gpu;
 using CoreBoy.memory.cart;
 using CoreBoy.serial;
@@ -19,6 +21,7 @@ internal sealed class GameBoyMachine : IMachine
     };
 
     private readonly Gameboy gameboy;
+    private readonly ushort[] routineCandidates;
     private readonly Controller controller = new();
     private readonly NullDisplay display = new();
     private readonly AudioMeter meter = new();
@@ -29,6 +32,7 @@ internal sealed class GameBoyMachine : IMachine
         var options = new GameboyOptions { Rom = romPath, DisableBatterySaves = true, Headless = true };
         var cartridge = new Cartridge(options);
         gameboy = new Gameboy(options, cartridge, display, controller, meter, new NullSerialEndpoint());
+        routineCandidates = ScanRoutines(File.ReadAllBytes(romPath));
         gameboy.Mmu.WriteObserver = OnWrite;
     }
 
@@ -117,6 +121,126 @@ internal sealed class GameBoyMachine : IMachine
     }
 
     private static bool IsCodeAddress(ushort a) => a is < 0x7FFD or >= 0xC000 and < 0xDFFD;
+
+    public IReadOnlyList<ushort> RoutineCandidates() => routineCandidates;
+
+    // Scans the ROM for `LD A, imm; CALL addr` (3E nn CD lo hi) targeting bank 0
+    // (or anywhere in 32 KB unbanked ROMs).
+    private static ushort[] ScanRoutines(byte[] rom)
+    {
+        ushort maxTarget = rom.Length <= 0x8000 ? (ushort)0x8000 : (ushort)0x4000;
+        var values = new Dictionary<ushort, HashSet<byte>>();
+        for (var i = 0; i + 4 < rom.Length; i++)
+        {
+            if (rom[i] != 0x3E || rom[i + 2] != 0xCD) continue;
+            var target = (ushort)(rom[i + 3] | (rom[i + 4] << 8));
+            if (target < 0x0100 || target >= maxTarget) continue;
+            if (!values.TryGetValue(target, out var set)) values[target] = set = new HashSet<byte>();
+            set.Add(rom[i + 1]);
+        }
+        return values.Where(kv => kv.Value.Count >= 3)
+            .OrderByDescending(kv => kv.Value.Count).ThenBy(kv => kv.Key)
+            .Take(32).Select(kv => kv.Key).ToArray();
+    }
+
+    private static readonly PropertyInfo CpuStateProp =
+        typeof(Cpu).GetProperty(nameof(Cpu.State), BindingFlags.Instance | BindingFlags.Public)
+        ?? throw new MissingMemberException(nameof(Cpu), nameof(Cpu.State));
+    private static readonly FieldInfo CpuInterruptManagerField = CoreField(typeof(Cpu), "_interruptManager");
+    private static readonly FieldInfo ImeField = CoreField(typeof(InterruptManager), "_ime");
+    private static readonly FieldInfo PendingEnableField = CoreField(typeof(InterruptManager), "_pendingEnableInterrupts");
+    private static readonly FieldInfo PendingDisableField = CoreField(typeof(InterruptManager), "_pendingDisableInterrupts");
+
+    private static FieldInfo CoreField(Type type, string name) =>
+        type.GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)
+        ?? throw new MissingFieldException(type.Name, name);
+
+    internal bool InterruptMasterEnabled => gameboy.Cpu.InterruptMasterEnabled;
+
+    // Invokes an SM83 subroutine at `address` with `arg` in A until RET lands
+    // on the sentinel return address ($FFFF) at the original SP. Games often
+    // end a frame in HALT waiting for VBlank, so HALT is suspended for the call
+    // and restored afterwards, along with IME and all registers.
+    public bool Call(ushort address, byte arg, int maxInstructions = 4000)
+    {
+        const int sentinel = 0xFFFF;
+        // Finish the current instruction so CPU state is at an opcode or HALT boundary.
+        for (var t = 0; t < 24 && gameboy.Cpu.State is not (CoreBoy.cpu.State.OPCODE or CoreBoy.cpu.State.HALTED); t++)
+            gameboy.Tick();
+        var savedState = gameboy.Cpu.State;
+        if (savedState is not (CoreBoy.cpu.State.OPCODE or CoreBoy.cpu.State.HALTED))
+            return false;
+
+        var r = gameboy.Cpu.Registers;
+        var savedA = r.A;
+        var savedFlags = r.Flags.FlagsByte;
+        var savedB = r.B;
+        var savedC = r.C;
+        var savedD = r.D;
+        var savedE = r.E;
+        var savedH = r.H;
+        var savedL = r.L;
+        var savedSp = r.SP;
+        var savedPc = r.PC;
+        var irq = (InterruptManager)CpuInterruptManagerField.GetValue(gameboy.Cpu)!;
+        var savedIme = (bool)ImeField.GetValue(irq)!;
+        var savedPendingEn = (int)PendingEnableField.GetValue(irq)!;
+        var savedPendingDis = (int)PendingDisableField.GetValue(irq)!;
+
+        if (savedState == CoreBoy.cpu.State.HALTED)
+            CpuStateProp.SetValue(gameboy.Cpu, CoreBoy.cpu.State.OPCODE);
+        irq.DisableInterrupts(false);
+
+        var newSp = (savedSp - 2) & 0xFFFF;
+        Poke((ushort)newSp, sentinel & 0xFF);
+        Poke((ushort)((newSp + 1) & 0xFFFF), (sentinel >> 8) & 0xFF);
+        r.SP = newSp;
+        r.PC = address;
+        r.A = arg;
+        r.Flags.SetZ(arg == 0);
+
+        var returned = false;
+        try
+        {
+            var instructions = 0;
+            for (var t = 0; t < maxInstructions * 24 && instructions < maxInstructions; t++)
+            {
+                var wasOpcode = gameboy.Cpu.State == CoreBoy.cpu.State.OPCODE;
+                gameboy.Tick();
+                if (!wasOpcode && gameboy.Cpu.State == CoreBoy.cpu.State.OPCODE)
+                {
+                    instructions++;
+                    if (r.PC == sentinel && r.SP == savedSp)
+                    {
+                        returned = true;
+                        break;
+                    }
+                }
+            }
+        }
+        catch (Exception)
+        {
+            returned = false;
+        }
+        finally
+        {
+            r.A = savedA;
+            r.Flags.SetFlagsByte(savedFlags);
+            r.B = savedB;
+            r.C = savedC;
+            r.D = savedD;
+            r.E = savedE;
+            r.H = savedH;
+            r.L = savedL;
+            r.SP = savedSp;
+            r.PC = savedPc;
+            CpuStateProp.SetValue(gameboy.Cpu, savedState);
+            ImeField.SetValue(irq, savedIme);
+            PendingEnableField.SetValue(irq, savedPendingEn);
+            PendingDisableField.SetValue(irq, savedPendingDis);
+        }
+        return returned;
+    }
 
     public void Dispose()
     {

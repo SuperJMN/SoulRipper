@@ -34,4 +34,15 @@ internal interface IMachine : IDisposable
     // the call instruction's address and its jump target. Used to find a
     // banked sound driver's fixed-bank dispatcher.
     IEnumerable<(ushort CallSite, ushort Target)> CallStack() => Array.Empty<(ushort, ushort)>();
+
+    // Subroutines in the ROM called with an immediate argument in A (e.g.
+    // LDA #imm; JSR addr on NES, LD A,imm; CALL addr on GB), ranked by how
+    // many distinct values they receive. Fallback when a game requests sounds
+    // by calling routines directly rather than poking a RAM queue.
+    IReadOnlyList<ushort> RoutineCandidates() => Array.Empty<ushort>();
+
+    // Invokes the subroutine at `address` with `arg` in A until it returns,
+    // restoring CPU registers afterwards. Returns false if it does not return
+    // cleanly within `maxInstructions`.
+    bool Call(ushort address, byte arg, int maxInstructions = 4000) => false;
 }

@@ -47,5 +47,28 @@ public class WireTests
 
         Assert.Empty(ctx.Consumers!);
         Assert.Empty(report.Consumers);
+        Assert.False(ctx.CallMode);
+        Assert.Empty(ctx.DriverReads!);
+        Assert.False(report.IsCall);
+    }
+
+    [Fact]
+    public void Call_mode_and_driver_reads_cross_the_worker_boundary()
+    {
+        var ctx = new ProbeContext(new ushort[] { 0x8155 }, 0x01F0, 0x01FF, new ushort[] { 0xF859 },
+            null, new(), 99UL, CallMode: true, DriverReads: new ushort[] { 0x0600, 0x0066 });
+        var report = new AddressReport(0xF859, 0, new() { new Response(0x00, 11UL, true, true) }, IsCall: true);
+
+        var decodedCtx = Wire.DecodeContext(JsonNode.Parse(Wire.Encode(ctx).ToJsonString())!);
+        var decodedReport = Wire.DecodeAddress(JsonNode.Parse(Wire.Encode(report).ToJsonString())!);
+
+        Assert.True(decodedCtx.CallMode);
+        Assert.Equal(new ushort[] { 0x0600, 0x0066 }, decodedCtx.DriverReads);
+        Assert.True(decodedReport.IsCall);
+        Assert.False(decodedReport.IsTrigger);
+
+        var callSound = Sounds.Of(0xF859, 0x00, "music", frames: 200, loopStart: 100) with { IsCall = true };
+        var decodedSound = Wire.DecodeSound(JsonNode.Parse(Wire.Encode(callSound).ToJsonString())!);
+        Assert.True(decodedSound.IsCall);
     }
 }

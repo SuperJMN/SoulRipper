@@ -8,9 +8,9 @@ namespace SoulRipper;
 // lists the CRC32s of its ROMs ("crc") ships inside the tool and is used for
 // them without --profile.
 internal sealed record Profile(string? Name, string Author, string Date, Reach? Reach,
-    IReadOnlyList<(ushort Queue, byte Value, string Name)> Requests, IReadOnlyList<string> Crcs)
+    IReadOnlyList<(ushort Queue, byte Value, string Name, bool IsRoutine)> Requests, IReadOnlyList<string> Crcs)
 {
-    public static readonly Profile Empty = new(null, "", "", null, Array.Empty<(ushort, byte, string)>(), Array.Empty<string>());
+    public static readonly Profile Empty = new(null, "", "", null, Array.Empty<(ushort, byte, string, bool)>(), Array.Empty<string>());
 
     public static Profile Load(string path) => Parse(File.ReadAllText(path));
 
@@ -39,15 +39,17 @@ internal sealed record Profile(string? Name, string Author, string Date, Reach? 
             : root.TryGetProperty("boot_frames", out var b) ? Reach.Default with { Boot = b.GetInt32() }
             : null;
 
-        var requests = new List<(ushort, byte, string)>();
+        var requests = new List<(ushort, byte, string, bool)>();
         foreach (var list in new[] { "music", "sfx" })
         {
             if (!root.TryGetProperty(list, out var entries)) continue;
             foreach (var e in entries.EnumerateArray())
             {
-                if (!e.TryGetProperty("queue", out var q) || !e.TryGetProperty("value", out var v)) continue;
+                if (!e.TryGetProperty("value", out var v)) continue;
+                var isRoutine = !e.TryGetProperty("queue", out var q);
+                if (isRoutine && !e.TryGetProperty("routine", out q)) continue;
                 var name = e.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
-                requests.Add(((ushort)Number(q), (byte)Number(v), name));
+                requests.Add(((ushort)Number(q), (byte)Number(v), name, isRoutine));
             }
         }
         var crcs = root.TryGetProperty("crc", out var c) && c.ValueKind == JsonValueKind.Array
@@ -56,7 +58,9 @@ internal sealed record Profile(string? Name, string Author, string Date, Reach? 
         return new Profile(Text("name") is { Length: > 0 } game ? game : null, Text("author"), Text("date"), reach, requests, crcs);
     }
 
-    public IEnumerable<ushort> Queues => Requests.Select(r => r.Queue).Distinct();
+    // Only RAM queues go to --queues / extra; routine entries are named without
+    // poking ROM addresses.
+    public IEnumerable<ushort> Queues => Requests.Where(r => !r.IsRoutine).Select(r => r.Queue).Distinct();
 
     // Sound id -> curated name.
     public Dictionary<string, string> Names() => Requests

@@ -48,4 +48,21 @@ public sealed class ProfileTests : IDisposable
     {
         Assert.Null(Profile.ForCrcs(new HashSet<string> { "00000000" }));
     }
+
+    [Fact]
+    public void Routine_entries_name_sounds_without_adding_rom_addresses_to_queues()
+    {
+        var profile = Profile.Parse(
+            """
+            {
+              "name": "Kirby's Adventure",
+              "music": [{ "name": "Green Greens", "id": "F859_04", "routine": "0xF859", "value": 4, "kind": "music" }],
+              "sfx": [{ "name": "Jump", "id": "04F1_01", "queue": "0x04F1", "value": 1, "kind": "sfx" }]
+            }
+            """);
+
+        Assert.Equal(new ushort[] { 0x04F1 }, profile.Queues.ToArray());
+        Assert.Equal("Green Greens", profile.Names()["F859_04"]);
+        Assert.Equal("Jump", profile.Names()["04F1_01"]);
+    }
 }

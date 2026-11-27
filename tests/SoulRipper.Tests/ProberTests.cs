@@ -191,4 +191,159 @@ public class ProberTests
         Assert.Equal(new[] { "00CA_01", "00CA_02" }, sounds.Select(s => s.Id).Order().ToArray());
         Assert.Contains(discovery.Addresses, a => a.Address == 0x037B && !a.IsTrigger);
     }
+
+    [Fact]
+    public void Discovery_falls_back_to_sound_routines_and_rejects_game_object_spawners()
+    {
+        // Models a game with no RAM request queue (Kirby's Adventure style):
+        // $F859 starts music directly inside the driver (and $FF silences it),
+        // $F826 starts SFX directly, and $CBA2 is a game object spawner that
+        // writes dozens of WRAM bytes and happens to touch a bank variable.
+        var machine = new FakeMachine
+        {
+            Routines = new ushort[] { 0xF859, 0xF826, 0xCBA2 },
+        };
+        machine.Poke(0x0600, 1); // title music playing initially
+
+        machine.OnCall = (m, addr, arg) =>
+        {
+            if (addr == 0xF859)
+            {
+                if (arg == 0xFF) m.BusWrite(0x0600, 0, 0x8105);
+                else if (arg is 0x00 or 0x01) m.BusWrite(0x0600, (byte)(arg + 1), 0x8105);
+                return true;
+            }
+            if (addr == 0xF826)
+            {
+                if (arg is 0x00 or 0x01)
+                {
+                    m.BusWrite(0x0601, (byte)(arg + 1), 0x8028);
+                    m.BusWrite(0x0602, 3, 0x8028);
+                }
+                return true;
+            }
+            if (addr == 0xCBA2)
+            {
+                // Touches bank variable $0048 plus >8 game-state bytes outside the driver.
+                m.BusWrite(0x0048, 0x1D, 0xCBA5);
+                for (ushort a = 0x0500; a < 0x0514; a++)
+                    m.BusWrite(a, arg, 0xCBB6);
+                return true;
+            }
+            return false;
+        };
+
+        machine.OnFrame = (m, f) =>
+        {
+            var song = m.BusRead(0x0600, 0x8158);
+            var sfx = m.BusRead(0x0601, 0x8160);
+            var timer = m.BusRead(0x0602, 0x8165);
+            m.Audible = song != 0 || timer > 0;
+            if (song != 0)
+            {
+                m.BusWrite(0x4002, (byte)((f & 0x07) + song * 16), 0x81D8);
+                m.BusWrite(0x4006, (byte)((f & 0x03) + song * 8), 0x81F8);
+            }
+            if (timer > 0)
+            {
+                m.BusWrite(0x400E, (byte)(sfx * 4 + timer), 0x8235);
+                m.BusWrite(0x0602, (byte)(timer - 1), 0x8169);
+            }
+            else if (song == 0)
+            {
+                m.BusWrite(0x4017, 0xC0, 0x8155);
+            }
+        };
+
+        var settings = new DiscoverySettings
+        {
+            AnalysisFrames = 6,
+            ProbeFrames = 4,
+            ReferenceFrames = 30,
+            MaxFrames = 60,
+            QuietFrames = 6,
+            MusicMinFrames = 20,
+        };
+        var prober = new Prober(machine, machine.SaveState(), settings);
+        using var pool = new LocalPool(prober);
+        var discovery = new Discovery(prober, pool, settings, _ => { });
+
+        var sounds = discovery.Run();
+
+        Assert.Equal("F859 = FF", discovery.Rebased);
+        Assert.Equal(new[] { "F826_00", "F826_01", "F859_00", "F859_01" }, sounds.Select(s => s.Id).Order().ToArray());
+        Assert.DoesNotContain(sounds, s => s.Address == 0xCBA2);
+    }
+
+    [Fact]
+    public void Sweep_accepts_a_small_enqueue_routine_writing_driver_read_ram()
+    {
+        // Models Mega Man 2's $C051: writes only buffer + count (2 bytes),
+        // without directly calling the banked driver during Call.
+        var machine = new FakeMachine();
+        machine.OnCall = (m, addr, arg) =>
+        {
+            if (addr != 0xC051) return false;
+            var count = m.Peek(0x0066);
+            m.BusWrite((ushort)(0x0580 + count), arg, 0xC057);
+            m.BusWrite(0x0066, (byte)(count + 1), 0xC05A);
+            return true;
+        };
+        machine.OnFrame = (m, _) =>
+        {
+            var count = m.BusRead(0x0066, 0xD0AD);
+            if (count > 0)
+            {
+                var req = m.BusRead((ushort)(0x057F + count), 0xD0B1);
+                m.BusWrite(0x0066, (byte)(count - 1), 0xD0BD);
+                m.BusWrite(0x4002, req, 0x84EA);
+            }
+        };
+
+        var settings = new DiscoverySettings { ProbeFrames = 4 };
+        var prober = new Prober(machine, machine.SaveState(), settings);
+        prober.Apply(new ProbeContext(
+            new ushort[] { 0x84EA }, 0x01F0, 0x01FF, Array.Empty<ushort>(), null, new(), 0,
+            CallMode: true, DriverReads: new ushort[] { 0x0066 }));
+
+        var report = prober.Sweep(new ushort[] { 0xC051 })[0];
+
+        Assert.True(report.IsTrigger);
+        Assert.True(report.IsCall);
+    }
+
+    [Fact]
+    public void Capture_in_call_mode_records_chip_writes_and_dmc_samples_made_during_call()
+    {
+        var machine = new FakeMachine();
+        machine.Poke(0xC000, 0xAA);
+        machine.OnCall = (m, addr, arg) =>
+        {
+            if (addr != 0xF826) return false;
+            // Synchronous APU writes + DMC sample start inside Call itself.
+            m.BusWrite(0x4003, arg, 0x8028);
+            m.BusWrite(0x4012, 0x00, 0x8028);
+            m.BusWrite(0x4013, 0x00, 0x8028);
+            m.BusWrite(0x4015, 0x1F, 0x8028);
+            m.Audible = true;
+            return true;
+        };
+        machine.OnFrame = (m, f) =>
+        {
+            if (f >= 2) m.Audible = false;
+        };
+
+        var settings = new DiscoverySettings { ReferenceFrames = 10, MaxFrames = 30, QuietFrames = 4 };
+        var prober = new Prober(machine, machine.SaveState(), settings);
+        prober.Apply(new ProbeContext(
+            new ushort[] { 0x8028 }, 0x01F0, 0x01FF, Array.Empty<ushort>(), null, new(), 0,
+            CallMode: true));
+
+        var sound = prober.Capture(0xF826, 0x07);
+
+        Assert.True(sound.IsCall);
+        Assert.Equal("sfx", sound.Kind);
+        Assert.Contains((0, (ushort)0x4003, (byte)0x07), sound.Writes);
+        Assert.Contains(sound.Samples!, s => s.Frame == 0 && s.Address == 0xC000 && s.Data[0] == 0xAA);
+    }
 }

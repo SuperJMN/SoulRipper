@@ -87,6 +87,17 @@ Dream Land (GB); Super Mario Bros. 1 and 3, Mega Man 2, Zelda (NES).
   DuckTales now rips cleanly in 3.0 min: 11 music (all main themes looped
   and named), 4 jingles, 36 sfx instead of 1859 silent 0.02 s channel-pitch
   artifacts.
+- Direct sound-routine invocation (`IMachine.Call` + `RoutineCandidates`):
+  when RAM probing finds fewer than two music/jingle tracks, discovery scans
+  the ROM for subroutines called with distinct immediates in `A`
+  (`LDA #imm; JSR addr` on NES, `LD A,imm; CALL addr` on GB), probes those
+  that enter the driver or write a small queue read by it, rebases on
+  silence and captures them directly. Kirby's Adventure (HAL, direct calls
+  `$F859`/`$F826`, no RAM queue) now rips in ~2-3 min with 39 music (38
+  looped), 9 jingles and 92 sfx (49 named) instead of 2 silent 0.08 s
+  artifacts; Mega Man 2 (Capcom, count-indexed buffer enqueued via `$C051`)
+  now rips 18 music, 7 jingles and 35 sfx (25 named) with `C051 = FF`
+  silence rebase.
 - Emulator libraries published to NuGet (`Zafiro.GameBoy.Debug.Emulator`,
   `Zafiro.Nes.Debug.Emulator`); public repository; Fleet project; first
   release (0.1.0, tagged).
@@ -108,8 +119,7 @@ Dream Land (GB); Super Mario Bros. 1 and 3, Mega Man 2, Zelda (NES).
    any plausible music (e.g. writes to unused registers, silence).
 3. **Re-check every test ROM** with the current engine and record the
    results here: Tetris (found DFE0/DFE8/DFF0/DFF8, rebased on `DFE8 = FF`,
-   138 sounds, too many musics), Kirby, SMB1, Zelda, MM2 (only 2 false
-   queues: its requests go through a ring buffer, not a byte), SML2.
+   138 sounds, too many musics), Kirby (GB), SMB1, Zelda, SML2.
 4. **Suspect rules for garbage music.** Music that never loops or ends
    within the cap is likely garbage; consider marking it suspect.
 5. **Effect names.** Community rips name music only. Built-in profiles
@@ -121,9 +131,10 @@ Dream Land (GB); Super Mario Bros. 1 and 3, Mega Man 2, Zelda (NES).
    vgmrips.net pack when there is one (Zelda: all 15; SMB3 has a pack but
    is not re-checked yet). Look for NSFe sets (`tlbl` chunk) for games
    without a pack.
-7. **Ring-buffer request queues** (Mega Man 2): requests written to a
-   buffer by a game routine. Detect the routine that writes the buffer and
-   call it, or poke buffer + index together.
+7. **Other argument-passing conventions for sound routines.** Direct routine
+   probing currently scans `LDA #imm; JSR` (NES) and `LD A,imm; CALL` (GB);
+   extend if games pass sound IDs in `X`/`Y`/`B`/`C` or through bank-switch
+   trampolines.
 
 ## 2. Nice to have
 

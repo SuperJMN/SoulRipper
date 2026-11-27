@@ -39,16 +39,55 @@ internal sealed class Discovery(Prober local, IWorkPool pool, DiscoverySettings 
         Addresses = Sweep(ctx, candidates);
         var triggers = Addresses.Where(a => a.IsTrigger).ToList();
         log($"triggers: {string.Join(", ", triggers.Select(t => $"{t.Address:X4} ({t.Responses.Count} values)"))}");
-        if (triggers.Count == 0)
-            return new List<Sound>();
 
-        ctx = Applied(ctx with { Guarded = triggers.Select(t => t.Address).ToArray(), Consumers = ConsumersOf(triggers) });
-        if (s.Rebase)
-            (ctx, triggers) = RebaseOnSilence(ctx, triggers, idleState);
+        var sounds = new List<Sound>();
+        if (triggers.Count > 0)
+        {
+            ctx = Applied(ctx with { Guarded = triggers.Select(t => t.Address).ToArray(), Consumers = ConsumersOf(triggers) });
+            if (s.Rebase)
+                (ctx, triggers) = RebaseOnSilence(ctx, triggers, idleState);
+            ctx = Applied(ctx with { Frozen = local.GameOwnedRam() });
+            log($"freezing {ctx.Frozen.Count} bytes of game state during captures");
+            sounds = Capture(ctx, triggers);
+        }
 
-        ctx = Applied(ctx with { Frozen = local.GameOwnedRam() });
-        log($"freezing {ctx.Frozen.Count} bytes of game state during captures");
-        return Capture(ctx, triggers);
+        // Games that request sounds by calling a subroutine (Kirby's Adventure
+        // $F826/$F859, Mega Man 2 $C051) have no RAM queue bytes to poke (or at
+        // most a single false trigger re-recording the active title music), so
+        // fall back to probing ROM routines called with an immediate in A.
+        if (queues is null && sounds.Count(x => x.Kind is "music" or "jingle") < 2)
+        {
+            var routines = local.Machine.RoutineCandidates();
+            if (routines.Count > 0)
+            {
+                log($"no music queue found in RAM; probing {routines.Count} sound routine candidates");
+                var callCtx = Applied(new ProbeContext(apuPcs, minSp, maxSp, Array.Empty<ushort>(), null, new(), 0,
+                    CallMode: true, DriverReads: candidates.ToArray()));
+                var callAddresses = Sweep(callCtx, routines);
+                var callTriggers = callAddresses.Where(a => a.IsTrigger).ToList();
+                log($"routine triggers: {string.Join(", ", callTriggers.Select(t => $"{t.Address:X4} ({t.Responses.Count} values)"))}");
+                if (callTriggers.Count > 0)
+                {
+                    var ramAddresses = Addresses;
+                    var ramRebased = Rebased;
+                    Addresses = callAddresses;
+                    Rebased = null;
+                    callCtx = Applied(callCtx with { Guarded = callTriggers.Select(t => t.Address).ToArray() });
+                    if (s.Rebase)
+                        (callCtx, callTriggers) = RebaseOnSilence(callCtx, callTriggers, idleState);
+                    callCtx = Applied(callCtx with { Frozen = local.GameOwnedRam() });
+                    log($"freezing {callCtx.Frozen.Count} bytes of game state during captures");
+                    var callSounds = Capture(callCtx, callTriggers);
+                    var callMusic = callSounds.Count(x => x.Kind is "music" or "jingle");
+                    var ramMusic = sounds.Count(x => x.Kind is "music" or "jingle");
+                    if (callMusic > ramMusic || callMusic == ramMusic && callSounds.Count > sounds.Count)
+                        return callSounds;
+                    Addresses = ramAddresses;
+                    Rebased = ramRebased;
+                }
+            }
+        }
+        return sounds;
     }
 
     // Applies the context locally and stamps it with the base checksum the
@@ -102,7 +141,7 @@ internal sealed class Discovery(Prober local, IWorkPool pool, DiscoverySettings 
                 // If a ring-buffer queue advanced its read index when consuming the
                 // stop command (DuckTales $C8-$CF), its dispatcher now reads the
                 // next slot: probe any new bytes read near the trigger consumers.
-                if (resweep.Any(r => r.Responses.Count * 2 < origByAddr[r.Address]))
+                if (!rebased.CallMode && resweep.Any(r => r.Responses.Count * 2 < origByAddr[r.Address]))
                 {
                     var consumerPcs = (rebased.Consumers ?? Array.Empty<ConsumerRule>()).Select(r => r.Pc).ToArray();
                     var extra = local.ReadsNear(consumerPcs)
@@ -174,10 +213,13 @@ internal sealed class Discovery(Prober local, IWorkPool pool, DiscoverySettings 
 
         var rest = distinct.Where(t => StopPriority(t.Value) >= 4).ToList();
         var fallback = SilencersIn(rest, maxSingleByteSilencers - fastCandidates.Count);
-        var driverRam = local.DriverRam();
-        if (idleState is not null)
-            fallback.Add(("the driver's idle RAM", local.ValuesIn(idleState, driverRam), null));
-        fallback.Add(("the driver's RAM cleared", driverRam.Select(a => (a, (byte)0)).ToList(), null));
+        if (!ctx.CallMode)
+        {
+            var driverRam = local.DriverRam();
+            if (idleState is not null)
+                fallback.Add(("the driver's idle RAM", local.ValuesIn(idleState, driverRam), null));
+            fallback.Add(("the driver's RAM cleared", driverRam.Select(a => (a, (byte)0)).ToList(), null));
+        }
         if (TrySilencers(fallback) is { } slow)
             return slow;
 

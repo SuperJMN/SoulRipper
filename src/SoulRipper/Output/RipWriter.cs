@@ -42,7 +42,9 @@ internal static class RipWriter
             var name = NameOf(s, names) ?? $"{KindLabels[s.Kind]} {index:00}";
             var file = $"{folder}/{SafeFileName($"{index:00} - {name}")}.{(compress ? "vgz" : "vgm")}";
             var gd3 = new Gd3(name, rip.Game, SystemNames[rip.System], rip.Author, rip.Date,
-                $"Ripped by SoulRipper: request 0x{s.Address:X4} = 0x{s.Value:X2}");
+                s.IsCall
+                    ? $"Ripped by SoulRipper: call 0x{s.Address:X4}(0x{s.Value:X2})"
+                    : $"Ripped by SoulRipper: request 0x{s.Address:X4} = 0x{s.Value:X2}");
             var path = Path.Combine(outDir, file);
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             var vgm = VgmWriter.Encode(rip.System, s.Init, s.Writes, s.Frames, s.LoopStart, gd3, samples: s.Samples);
@@ -76,7 +78,7 @@ internal static class RipWriter
             ["id"] = s.Id,
             ["name"] = e.Name,
             ["kind"] = s.Kind,
-            ["queue"] = $"0x{s.Address:X4}",
+            [s.IsCall ? "routine" : "queue"] = $"0x{s.Address:X4}",
             ["value"] = s.Value,
             ["seconds"] = e.Seconds,
             ["end"] = s.End,
@@ -99,7 +101,7 @@ internal static class RipWriter
             {
                 ["name"] = e.Name ?? e.Sound.Id,
                 ["id"] = e.Sound.Id,
-                ["queue"] = $"0x{e.Sound.Address:X4}",
+                [e.Sound.IsCall ? "routine" : "queue"] = $"0x{e.Sound.Address:X4}",
                 ["value"] = e.Sound.Value,
                 ["kind"] = e.Sound.Kind,
             }).ToArray());

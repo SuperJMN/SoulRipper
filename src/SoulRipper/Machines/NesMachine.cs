@@ -32,15 +32,34 @@ internal sealed class NesMachine : IMachine
         ("sweepperiod", 8), ("sweepshift", 8), ("sweeppos", 8),
     });
 
+    // CPU register and NMI fields on NesCore for direct subroutine invocation (Call).
+    private static readonly FieldInfo RegA = CoreField("r_A");
+    private static readonly FieldInfo RegX = CoreField("r_X");
+    private static readonly FieldInfo RegY = CoreField("r_Y");
+    private static readonly FieldInfo RegSp = CoreField("r_SP");
+    private static readonly FieldInfo RegPc = CoreField("r_PC");
+    private static readonly FieldInfo FlagN = CoreField("flagN");
+    private static readonly FieldInfo FlagV = CoreField("flagV");
+    private static readonly FieldInfo FlagD = CoreField("flagD");
+    private static readonly FieldInfo FlagI = CoreField("flagI");
+    private static readonly FieldInfo FlagZ = CoreField("flagZ");
+    private static readonly FieldInfo FlagC = CoreField("flagC");
+    private static readonly FieldInfo DoNmi = CoreField("doNMI");
+    private static readonly FieldInfo DoIrq = CoreField("doIRQ");
+
+    private static FieldInfo CoreField(string name) =>
+        typeof(NesCore).GetField(name, BindingFlags.Static | BindingFlags.NonPublic)
+        ?? throw new MissingFieldException(nameof(NesCore), name);
+
     private static (FieldInfo, int)[] ApuArraysOf((string Name, int Bytes)[] arrays)
     {
         var core = typeof(NesCore).Assembly.GetName().Version;
         if (core != ApuCheckedOn)
             throw new NotSupportedException($"AprNes {core}: check the APU array sizes NesMachine saves (checked on {ApuCheckedOn})");
-        return arrays.Select(x => (typeof(NesCore).GetField(x.Name, BindingFlags.Static | BindingFlags.NonPublic)
-                                   ?? throw new MissingFieldException(nameof(NesCore), x.Name), x.Bytes)).ToArray();
+        return arrays.Select(x => (CoreField(x.Name), x.Bytes)).ToArray();
     }
 
+    private readonly ushort[] routineCandidates;
     private Action<ushort, ushort>? read;
     private int min = int.MaxValue, max = int.MinValue;
 
@@ -52,6 +71,7 @@ internal sealed class NesMachine : IMachine
     {
         if (!NesCore.DebugLoad(rom))
             throw new InvalidOperationException($"AprNes rejected the ROM: {name}");
+        routineCandidates = ScanRoutines(rom);
         NesCore.DebugSetMemoryObservers(OnWrite, null);
         NesCore.AudioSampleReady = (sample, _) =>
         {
@@ -164,6 +184,117 @@ internal sealed class NesMachine : IMachine
     }
 
     private static bool IsCodeAddress(ushort a) => a is >= 0x8000 and <= 0xFFFD or < 0x07FE or >= 0x6000 and < 0x7FFE;
+
+    public IReadOnlyList<ushort> RoutineCandidates() => routineCandidates;
+
+    // Scans PRG ROM for `LDA #imm; JSR addr` (A9 nn 20 lo hi) targeting the
+    // fixed bank (or anywhere in PRG on unbanked NROM). Games whose sound API
+    // is a direct subroutine call (Kirby's Adventure $F826/$F859, Mega Man 2
+    // $C051) show up near the top of the handful of matches.
+    private static ushort[] ScanRoutines(byte[] rom)
+    {
+        if (rom.Length < 16 || rom[0] != 'N' || rom[1] != 'E' || rom[2] != 'S' || rom[3] != 0x1A)
+            return Array.Empty<ushort>();
+        var prgBanks = (int)rom[4];
+        if ((rom[7] & 0x0C) == 0x08 && (rom[9] & 0x0F) != 0x0F)
+            prgBanks |= (rom[9] & 0x0F) << 8;
+        var prgOffset = 16 + ((rom[6] & 0x04) != 0 ? 512 : 0);
+        var prgEnd = prgBanks > 0 ? Math.Min(rom.Length, prgOffset + prgBanks * 0x4000) : rom.Length;
+        ushort minTarget = prgBanks is > 0 and <= 2 ? (ushort)0x8000 : (ushort)0xC000;
+        var values = new Dictionary<ushort, HashSet<byte>>();
+        for (var i = prgOffset; i + 4 < prgEnd; i++)
+        {
+            if (rom[i] != 0xA9 || rom[i + 2] != 0x20) continue;
+            var target = (ushort)(rom[i + 3] | (rom[i + 4] << 8));
+            if (target < minTarget) continue;
+            if (!values.TryGetValue(target, out var set)) values[target] = set = new HashSet<byte>();
+            set.Add(rom[i + 1]);
+        }
+        return values.Where(kv => kv.Value.Count >= 3)
+            .OrderByDescending(kv => kv.Value.Count).ThenBy(kv => kv.Key)
+            .Take(32).Select(kv => kv.Key).ToArray();
+    }
+
+    // Invokes a 6502 subroutine at `address` with `arg` in A (and matching Z/N
+    // flags) by pushing a sentinel return address ($FFFE -> RTS lands at $FFFF)
+    // and stepping until RTS returns to the original SP. Any NMI triggered
+    // during the call (AprNes finishes frames at scanline 240, ~114 cycles
+    // before scanline 241's NMI) is deferred until after Call returns so the
+    // game's NMI handler never interrupts the subroutine or pollutes probing.
+    public bool Call(ushort address, byte arg, int maxInstructions = 4000)
+    {
+        const ushort sentinel = 0xFFFF;
+        var savedA = (byte)RegA.GetValue(null)!;
+        var savedX = (byte)RegX.GetValue(null)!;
+        var savedY = (byte)RegY.GetValue(null)!;
+        var savedSp = (byte)RegSp.GetValue(null)!;
+        var savedPc = (ushort)RegPc.GetValue(null)!;
+        var savedN = (byte)FlagN.GetValue(null)!;
+        var savedV = (byte)FlagV.GetValue(null)!;
+        var savedD = (byte)FlagD.GetValue(null)!;
+        var savedI = (byte)FlagI.GetValue(null)!;
+        var savedZ = (byte)FlagZ.GetValue(null)!;
+        var savedC = (byte)FlagC.GetValue(null)!;
+        var deferredNmi = (bool)DoNmi.GetValue(null)!;
+        var deferredIrq = (bool)DoIrq.GetValue(null)!;
+        if (savedSp < 0x04)
+            return false;
+
+        // RTS pops lo, hi and increments PC by 1, so push (sentinel - 1).
+        Poke((ushort)(0x0100 | savedSp), (byte)((sentinel - 1) >> 8));
+        Poke((ushort)(0x0100 | (byte)(savedSp - 1)), (byte)((sentinel - 1) & 0xFF));
+        RegSp.SetValue(null, (byte)(savedSp - 2));
+        RegA.SetValue(null, arg);
+        RegPc.SetValue(null, address);
+        FlagI.SetValue(null, (byte)1);
+        FlagD.SetValue(null, (byte)0);
+        FlagZ.SetValue(null, (byte)(arg == 0 ? 1 : 0));
+        FlagN.SetValue(null, (byte)((arg & 0x80) != 0 ? 1 : 0));
+        DoNmi.SetValue(null, false);
+        DoIrq.SetValue(null, false);
+
+        var startFrame = NesCore.frame_count;
+        var returned = false;
+        try
+        {
+            for (var i = 0; i < maxInstructions; i++)
+            {
+                if ((bool)DoNmi.GetValue(null)!) { deferredNmi = true; DoNmi.SetValue(null, false); }
+                if ((bool)DoIrq.GetValue(null)!) { deferredIrq = true; DoIrq.SetValue(null, false); }
+                NesCore.DebugStepInstruction();
+                if ((bool)DoNmi.GetValue(null)!) { deferredNmi = true; DoNmi.SetValue(null, false); }
+                if ((bool)DoIrq.GetValue(null)!) { deferredIrq = true; DoIrq.SetValue(null, false); }
+                if ((ushort)RegPc.GetValue(null)! == sentinel && (byte)RegSp.GetValue(null)! == savedSp)
+                {
+                    returned = true;
+                    break;
+                }
+                if (NesCore.frame_count - startFrame > 1)
+                    break;
+            }
+        }
+        catch (Exception)
+        {
+            returned = false;
+        }
+        finally
+        {
+            RegA.SetValue(null, savedA);
+            RegX.SetValue(null, savedX);
+            RegY.SetValue(null, savedY);
+            RegSp.SetValue(null, savedSp);
+            RegPc.SetValue(null, savedPc);
+            FlagN.SetValue(null, savedN);
+            FlagV.SetValue(null, savedV);
+            FlagD.SetValue(null, savedD);
+            FlagI.SetValue(null, savedI);
+            FlagZ.SetValue(null, savedZ);
+            FlagC.SetValue(null, savedC);
+            DoNmi.SetValue(null, deferredNmi);
+            DoIrq.SetValue(null, deferredIrq);
+        }
+        return returned;
+    }
 
     public void Dispose()
     {

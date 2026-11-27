@@ -18,8 +18,12 @@ internal sealed class FakeMachine((ushort Address, byte Value)? crashAt = null) 
     public bool Audible { get; set; }
     public Action<FakeMachine, int>? OnFrame { get; set; }
     public (ushort CallSite, ushort Target)[] Stack { get; set; } = Array.Empty<(ushort, ushort)>();
+    public ushort[] Routines { get; set; } = Array.Empty<ushort>();
+    public Func<FakeMachine, ushort, byte, bool>? OnCall { get; set; }
 
     public IEnumerable<(ushort CallSite, ushort Target)> CallStack() => Stack;
+    public IReadOnlyList<ushort> RoutineCandidates() => Routines;
+    public bool Call(ushort address, byte arg, int maxInstructions = 4000) => OnCall?.Invoke(this, address, arg) ?? false;
 
     public byte BusRead(ushort address, ushort pc)
     {

@@ -60,6 +60,34 @@ public class NesMachineTests
         Assert.Contains(((ushort)0xC002, (ushort)0xC010), observed);
     }
 
+    [Fact]
+    public void Call_invokes_subroutine_restores_registers_defers_nmi_and_rejects_runaway()
+    {
+        using var nes = new NesMachine(RoutineRom());
+        nes.RunFrames(3); // lets PPU warm up and enable NMI
+        var before = AprNes.NesCore.DebugReadRegisters();
+        var nmiBefore = nes.Peek(0x0051);
+
+        Assert.Contains((ushort)0xC020, nes.RoutineCandidates());
+        Assert.True(nes.Call(0xC020, 0x37));
+        Assert.Equal((byte)0x37, nes.Peek(0x0050));
+        // NMI must not interrupt the subroutine even though it ran >114 cycles past SL 240.
+        Assert.Equal(nmiBefore, nes.Peek(0x0051));
+        var after = AprNes.NesCore.DebugReadRegisters();
+        Assert.Equal((before.A, before.X, before.Y, before.Sp, before.Pc, before.Status),
+            (after.A, after.X, after.Y, after.Sp, after.Pc, after.Status));
+
+        // Runaway routine returns false and still restores every register.
+        Assert.False(nes.Call(0xC040, 0x01, maxInstructions: 50));
+        var afterFail = AprNes.NesCore.DebugReadRegisters();
+        Assert.Equal((before.A, before.X, before.Y, before.Sp, before.Pc, before.Status),
+            (afterFail.A, afterFail.X, afterFail.Y, afterFail.Sp, afterFail.Pc, afterFail.Status));
+
+        // The deferred NMI still fires on the following frame.
+        nes.RunFrames(1);
+        Assert.True(nes.Peek(0x0051) > nmiBefore);
+    }
+
     // Pulse 1 at full constant volume with its length counter halted: it
     // plays until something stops it.
     private static void StartPulseNote(NesMachine nes)
@@ -93,6 +121,33 @@ public class NesMachineTests
         new byte[] { 0xA9, 0x08, 0x8D, 0x01, 0x40, 0x60 }.CopyTo(prg, 0x10);
         // NMI, RESET and IRQ vectors.
         new byte[] { 0x05, 0xC0, 0x00, 0xC0, 0x05, 0xC0 }.CopyTo(prg, 0x3FFA);
+        return header.Concat(prg).Concat(new byte[0x2000]).ToArray();
+    }
+
+    // NROM cartridge with NMI enabled (increments $51), a subroutine at $C020
+    // that clobbers X/Y, burns >300 cycles, stores A to $50 and returns, and a
+    // runaway loop at $C040.
+    private static byte[] RoutineRom()
+    {
+        var header = new byte[] { 0x4E, 0x45, 0x53, 0x1A, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        var prg = new byte[0x4000];
+        // $C000: SEI; CLD; LDA #$80; STA $2000; LDA #$11; LDX #$22; LDY #$33; loop: JMP loop ($C00D)
+        new byte[] { 0x78, 0xD8, 0xA9, 0x80, 0x8D, 0x00, 0x20, 0xA9, 0x11, 0xA2, 0x22, 0xA0, 0x33, 0x4C, 0x0D, 0xC0 }
+            .CopyTo(prg, 0);
+        // $C020: STA $50; LDX #$40; LDY #$99; spin: DEX; BNE spin; RTS
+        new byte[] { 0x85, 0x50, 0xA2, 0x40, 0xA0, 0x99, 0xCA, 0xD0, 0xFD, 0x60 }.CopyTo(prg, 0x20);
+        // $C030: three call sites with distinct immediates
+        new byte[]
+        {
+            0xA9, 0x01, 0x20, 0x20, 0xC0,
+            0xA9, 0x02, 0x20, 0x20, 0xC0,
+            0xA9, 0x03, 0x20, 0x20, 0xC0,
+        }.CopyTo(prg, 0x30);
+        // $C040: runaway: JMP $C040
+        new byte[] { 0x4C, 0x40, 0xC0 }.CopyTo(prg, 0x40);
+        // $C050: NMI handler: INC $51; RTI
+        new byte[] { 0xE6, 0x51, 0x40 }.CopyTo(prg, 0x50);
+        new byte[] { 0x50, 0xC0, 0x00, 0xC0, 0x0D, 0xC0 }.CopyTo(prg, 0x3FFA);
         return header.Concat(prg).Concat(new byte[0x2000]).ToArray();
     }
 }

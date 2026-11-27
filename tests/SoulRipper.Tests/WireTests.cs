@@ -49,14 +49,16 @@ public class WireTests
         Assert.Empty(report.Consumers);
         Assert.False(ctx.CallMode);
         Assert.Empty(ctx.DriverReads!);
+        Assert.Empty(ctx.DriverBanks!);
         Assert.False(report.IsCall);
     }
 
     [Fact]
     public void Call_mode_and_driver_reads_cross_the_worker_boundary()
     {
+        var banks = new[] { new DriverBank(0x849E, 0xEA40008Du) };
         var ctx = new ProbeContext(new ushort[] { 0x8155 }, 0x01F0, 0x01FF, new ushort[] { 0xF859 },
-            null, new(), 99UL, CallMode: true, DriverReads: new ushort[] { 0x0600, 0x0066 });
+            null, new(), 99UL, CallMode: true, DriverReads: new ushort[] { 0x0600, 0x0066 }, DriverBanks: banks);
         var report = new AddressReport(0xF859, 0, new() { new Response(0x00, 11UL, true, true) }, IsCall: true);
 
         var decodedCtx = Wire.DecodeContext(JsonNode.Parse(Wire.Encode(ctx).ToJsonString())!);
@@ -64,6 +66,7 @@ public class WireTests
 
         Assert.True(decodedCtx.CallMode);
         Assert.Equal(new ushort[] { 0x0600, 0x0066 }, decodedCtx.DriverReads);
+        Assert.Equal(banks, decodedCtx.DriverBanks);
         Assert.True(decodedReport.IsCall);
         Assert.False(decodedReport.IsTrigger);
 

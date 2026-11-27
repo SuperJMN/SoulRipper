@@ -34,4 +34,23 @@ public class TitlesTests
         Assert.True(Score("Super Mario Land (World)", "Super Mario Land") >= 0.9);
         Assert.True(Score("Super Mario Land (World)", "Super Mario Land 2 - 6 Golden Coins") < 0.9);
     }
+
+    [Fact]
+    public void Rip_search_checks_word_initials_before_other_letters_and_prefers_matching_region()
+    {
+        var (priority, fallback) = GameHints.SearchLetters("Mr. Gimmick (Europe)");
+        Assert.Equal(new[] { "m", "g" }, priority);
+        Assert.DoesNotContain("m", fallback);
+        Assert.DoesNotContain("g", fallback);
+
+        const string html = """
+            <a href="Gimmick!%20%5bMr.%20Gimmick%5d%20(1992-01-31)(-)(Sunsoft)%5bNES%5d.7z">jp</a>
+            <a href="Gimmick!%20EUR%20%5bMr.%20Gimmick%5d%20(1992-01-31)(-)(Sunsoft)%5bNES%5d.7z">eu</a>
+            """;
+        var best = GameHints.BestRipIn(html, Titles.Normalize("Mr. Gimmick (Europe)"), "EUR");
+        Assert.NotNull(best);
+        Assert.Contains("EUR", best.Value.Href);
+        Assert.Equal(1.0, best.Value.Score);
+        Assert.True(best.Value.RegionMatch);
+    }
 }

@@ -63,6 +63,36 @@ public class VgmPackTests
     }
 
     [Fact]
+    public void Pack_tracks_name_pal_captures_whose_timers_are_scaled_from_ntsc()
+    {
+        // PAL NES (1.662607 MHz) timers are ~7.65% smaller than NTSC (1.789772 MHz)
+        // for the exact same musical melody (Mr. Gimmick PAL ROM vs NTSC VGM pack).
+        int[] ntsc = { 331, 279, 248, 220, 207, 220, 279, 269, 240, 213 };
+        int[] pal = ntsc.Select(t => (int)Math.Round((t + 1) / Melody.NesPalToNtsc) - 1).ToArray();
+        var sounds = new[] { Sounds.Of(0xF2A3, 0x06, "music", writes: Tune(pal)) };
+        var pack = new[] { Track("Happy Birthday Superstar! (Stage 1)", Tune(ntsc)) };
+
+        var names = TrackPairing.PairByMelody(sounds, pack);
+
+        Assert.Equal(new Dictionary<string, string> { ["F2A3_06"] = "Happy Birthday Superstar! (Stage 1)" }, names);
+    }
+
+    [Fact]
+    public void Pal_ntsc_semitone_fallback_does_not_match_game_boy_tracks()
+    {
+        // Game Boy uses an inverted frequency register formula and has no
+        // PAL/NTSC clock split; OfSemitones must ignore Game Boy registers.
+        static List<(int, ushort, byte)> GbTune(params int[] raw) =>
+            raw.SelectMany((p, f) => new (int, ushort, byte)[] { (f, 0xFF13, (byte)p), (f, 0xFF14, (byte)(p >> 8)) }).ToList();
+        int[] a = { 331, 279, 248, 220, 207, 220, 279, 269, 240, 213 };
+        int[] b = a.Select(t => (int)Math.Round((t + 1) / Melody.NesPalToNtsc) - 1).ToArray();
+        var sounds = new[] { Sounds.Of(0xDFE8, 0x01, "music", writes: GbTune(b)) };
+        var pack = new[] { Track("Wrong GB Match", GbTune(a)) };
+
+        Assert.Empty(TrackPairing.PairByMelody(sounds, pack));
+    }
+
+    [Fact]
     public void A_pack_names_what_the_playlist_left_unnamed()
     {
         var sounds = new[]
@@ -114,5 +144,31 @@ public class VgmPackTests
 
         Assert.Equal(new[] { new VgmRips.Pack("Kirby's Dream Land (UE)", "https://vgmrips.net/files/GameBoy/Kirby%27s_Dream_Land.zip") },
             VgmRips.ParseListing(html));
+    }
+
+    [Fact]
+    public void Search_listings_filter_packs_to_the_target_systems_chips()
+    {
+        const string html = """
+            <div class="result row" id="pack-1">
+              <a href="https://vgmrips.net/packs/pack/contra-md">Contra: Hard Corps (U) / Probotector (E)</a>
+              <a class="download" href="https://vgmrips.net/files/MegaDrive/Contra.zip"></a>
+              <a class="badge" href="https://vgmrips.net/packs/chip/ym2612">YM2612</a>
+            </div>
+            <div class="result row" id="pack-2">
+              <a href="https://vgmrips.net/packs/pack/contra-nes">Contra (JU) / Probotector (E)</a>
+              <a class="download" href="https://vgmrips.net/files/NES/Contra_NES.zip"></a>
+              <a class="badge" href="https://vgmrips.net/packs/chip/nes-apu">NES APU</a>
+            </div>
+            <div class="result row" id="pack-3">
+              <a href="https://vgmrips.net/packs/pack/mr-gimmick-nes">Mr. Gimmick! (UE)</a>
+              <a class="download" href="https://vgmrips.net/files/NES/Mr._Gimmick%21_%28NES%29.zip"></a>
+              <a class="badge" href="https://vgmrips.net/packs/chip/nes-apu-rp2a07">NES APU (RP2A07)</a>
+            </div>
+            """;
+
+        var nes = VgmRips.ParseListing(html, new[] { "nes-apu", "nes-apu-rp2a07" }).ToList();
+
+        Assert.Equal(new[] { "Contra (JU) / Probotector (E)", "Mr. Gimmick! (UE)" }, nes.Select(p => p.Title).ToArray());
     }
 }

@@ -18,4 +18,22 @@ public class WorkPoolTests
 
         Assert.Equal(0x0300, Wire.DecodeAddress(results[0]!).Address);
     }
+
+    [Fact]
+    public void Crashed_worker_fallbacks_decode_through_wire_for_every_operation()
+    {
+        // Discovery passes sweep items as raw ushort JsonNodes; the fallback
+        // must survive the same Wire.DecodeAddress path as a real worker reply.
+        var sweepNode = ProcessPool.CrashedResult("sweep", (JsonNode?)(ushort)0xC6ED);
+        var report = Wire.DecodeAddress(sweepNode!);
+        Assert.Equal(0xC6ED, report.Address);
+        Assert.Empty(report.Responses);
+        Assert.False(report.IsTrigger);
+
+        var silentNode = ProcessPool.CrashedResult("silent", ProberOps.Request(0x0300, 0xFF));
+        Assert.False((bool)silentNode!);
+
+        var captureNode = ProcessPool.CrashedResult("capture", ProberOps.Request(0x0300, 0x01));
+        Assert.Null(captureNode);
+    }
 }

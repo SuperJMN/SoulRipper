@@ -20,6 +20,10 @@ internal sealed class Melody
         [0xFF22] = (3, true),
     };
 
+    // Ratio between the NTSC (RP2A03) and PAL (RP2A07) NES CPU clocks; a PAL
+    // ROM's pitch table writes timers ~7.65% smaller for the same musical note.
+    public const double NesPalToNtsc = 1789772.5 / 1662607.0;
+
     // Enough of a tune to tell it apart while keeping comparisons cheap.
     public const int MaxNotes = 120;
 
@@ -44,6 +48,41 @@ internal sealed class Melody
             var pitch = high[p.Channel] << 8 | low[p.Channel];
             if (notes.Count < MaxNotes && (notes.Count == 0 || notes[^1] != pitch))
                 notes.Add(pitch);
+        }
+        return new Melody(channels);
+    }
+
+    // Same melodic contour quantized to semitones after scaling NES tone timers
+    // by `timerScale`, so a PAL NES ROM matches an NTSC VGM pack (or vice versa)
+    // even though their raw timer values differ by ~7.65%. Game Boy registers
+    // ($FF10-$FF3F) are ignored here: GB has no PAL/NTSC clock split and uses
+    // an inverted (2048 - x) frequency formula.
+    public static Melody OfSemitones(IEnumerable<(ushort Address, byte Value)> writes, double timerScale = 1.0)
+    {
+        var channels = Enumerable.Range(0, 4).Select(_ => new List<int>()).ToArray();
+        var low = new int[4];
+        var high = new int[4];
+        foreach (var (address, value) in writes)
+        {
+            if (address >= 0xFF00 || !Pitch.TryGetValue(address, out var p))
+                continue;
+            if (p.Low) low[p.Channel] = value;
+            else high[p.Channel] = value & 7;
+            var pitch = high[p.Channel] << 8 | low[p.Channel];
+            int note;
+            if (p.Channel == 3)
+            {
+                note = pitch;
+            }
+            else
+            {
+                if (pitch < 8)
+                    continue;
+                note = (int)Math.Round(12.0 * Math.Log2((pitch + 1) * timerScale));
+            }
+            var notes = channels[p.Channel];
+            if (notes.Count < MaxNotes && (notes.Count == 0 || notes[^1] != note))
+                notes.Add(note);
         }
         return new Melody(channels);
     }

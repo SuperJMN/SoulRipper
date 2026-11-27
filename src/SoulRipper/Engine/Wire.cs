@@ -16,6 +16,8 @@ internal static class Wire
             .Select(r => (JsonNode)Ints(new[] { (int)r.Address, r.Pc, r.IdleValue })).ToArray()),
         ["call_mode"] = c.CallMode,
         ["driver_reads"] = Ints((c.DriverReads ?? Array.Empty<ushort>()).Select(x => (int)x)),
+        ["driver_banks"] = new JsonArray((c.DriverBanks ?? Array.Empty<DriverBank>())
+            .Select(b => (JsonNode)new JsonArray((int)b.Address, (long)b.Bytes)).ToArray()),
         ["rebase"] = c.Rebase is { } pokes
             ? new JsonArray(pokes.Select(p => (JsonNode)Ints(new[] { (int)p.Address, p.Value })).ToArray())
             : null,
@@ -28,6 +30,8 @@ internal static class Wire
         var rebase = n["rebase"]?.AsArray();
         var consumers = n["consumers"]?.AsArray()
             .Select(r => new ConsumerRule((ushort)(int)r![0]!, (ushort)(int)r[1]!, (byte)(int)r[2]!)).ToList();
+        var driverBanks = n["driver_banks"]?.AsArray()
+            .Select(b => new DriverBank((ushort)(int)b![0]!, (uint)(long)b[1]!)).ToArray();
         return new ProbeContext(
             UShorts(n["apu_pcs"]!),
             (int)n["min_sp"]!,
@@ -38,7 +42,8 @@ internal static class Wire
             ulong.Parse((string)n["checksum"]!),
             consumers ?? new List<ConsumerRule>(),
             (bool?)n["call_mode"] ?? false,
-            n["driver_reads"] is { } dr ? UShorts(dr) : Array.Empty<ushort>());
+            n["driver_reads"] is { } dr ? UShorts(dr) : Array.Empty<ushort>(),
+            driverBanks ?? Array.Empty<DriverBank>());
     }
 
     public static JsonObject Encode(AddressReport r) => new()

@@ -10,13 +10,18 @@ namespace SoulRipper.Hints;
 // other players.
 internal static class VgmRips
 {
-    private const string Site = "https://vgmrips.net/packs/chip/";
+    private const string Base = "https://vgmrips.net/packs/";
+    private const string Site = Base + "chip/";
     private const int PageSize = 20;
     private const int MaxPacks = 3;
 
     // The pack listings by chip cover every system that uses it (NES, Famicom,
-    // Vs.; Game Boy and Color).
-    private static readonly Dictionary<string, string> Chips = new() { ["nes"] = "nes-apu", ["gb"] = "game-boy-dmg" };
+    // PAL RP2A07/N2A07, Vs.; Game Boy and Color).
+    private static readonly Dictionary<string, string[]> Chips = new()
+    {
+        ["nes"] = new[] { "nes-apu", "nes-apu-rp2a07", "nes-apu-n2a07" },
+        ["gb"] = new[] { "game-boy-dmg", "game-boy-dmg-lr35092" },
+    };
 
     internal sealed record Pack(string Title, string Download);
 
@@ -24,7 +29,15 @@ internal static class VgmRips
     // they tie (Tetris has a Nintendo and a Tengen pack), and the melodies pick.
     public static List<VgmTrack> Lookup(HttpClient http, string game, string system, Action<string> log)
     {
-        var packs = Find(game, Letters(game).SelectMany(l => Listing(http, system, l)).DistinctBy(p => p.Download));
+        var chips = Chips[system];
+        var listed = chips.SelectMany(chip => Letters(game).SelectMany(l => Listing(http, chip, l)))
+            .DistinctBy(p => p.Download);
+        var packs = Find(game, listed);
+        // Alternative regional titles ("Contra (JU) / Probotector (E)") are filed
+        // under their primary title's letter; fall back to the site's search page
+        // filtered to this system's sound chips.
+        if (packs.Count == 0)
+            packs = Find(game, Search(http, game, system, chips));
         if (packs.Count == 0)
         {
             log("hints: no VGM pack found on vgmrips.net");
@@ -71,15 +84,27 @@ internal static class VgmRips
         return new[] { LetterOf(Titles.DisplayName(game)), LetterOf(game.TrimStart()) }.Distinct().ToList();
     }
 
-    // Every pack listed under a letter, page by page.
-    private static List<Pack> Listing(HttpClient http, string system, string letter)
+    // Every pack listed under a letter for a sound chip, page by page.
+    private static List<Pack> Listing(HttpClient http, string chip, string letter)
     {
         var packs = new List<Pack>();
         for (var page = 0; ; page++)
         {
-            var url = $"{Site}{Chips[system]}?letter={Uri.EscapeDataString(letter)}" + (page > 0 ? $"&p={page}" : "");
+            var url = $"{Site}{chip}?letter={Uri.EscapeDataString(letter)}" + (page > 0 ? $"&p={page}" : "");
             var name = (letter == "#" ? "0-9" : letter) + (page > 0 ? $"-{page}" : "") + ".html";
-            var html = File.ReadAllText(GameHints.Get(http, url, Path.Combine(GameHints.CacheDir, "index", "vgmrips", system, name)), Encoding.UTF8);
+            var path = Path.Combine(GameHints.CacheDir, "index", "vgmrips", chip, name);
+            string html;
+            try
+            {
+                html = File.ReadAllText(GameHints.Get(http, url, path), Encoding.UTF8);
+            }
+            catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+            {
+                // vgmrips.net returns 404 when a chip has no packs under a letter.
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                File.WriteAllText(path, "");
+                return packs;
+            }
             packs.AddRange(ParseListing(html));
             var total = Regex.Match(html, @"of (\d+) total") is { Success: true } m ? int.Parse(m.Groups[1].Value) : 0;
             if ((page + 1) * PageSize >= total)
@@ -87,10 +112,31 @@ internal static class VgmRips
         }
     }
 
-    public static IEnumerable<Pack> ParseListing(string html)
+    private static List<Pack> Search(HttpClient http, string game, string system, string[] chips)
+    {
+        var query = Titles.DisplayName(game);
+        var key = Titles.Normalize(game);
+        if (query.Length == 0 || key.Length == 0)
+            return new List<Pack>();
+        var url = $"{Base}search?q={Uri.EscapeDataString(query)}";
+        var path = Path.Combine(GameHints.CacheDir, "index", "vgmrips", "search", $"{system}-{key}.html");
+        try
+        {
+            var html = File.ReadAllText(GameHints.Get(http, url, path), Encoding.UTF8);
+            return ParseListing(html, chips).ToList();
+        }
+        catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+        {
+            return new List<Pack>();
+        }
+    }
+
+    public static IEnumerable<Pack> ParseListing(string html, IReadOnlyCollection<string>? requiredChips = null)
     {
         foreach (var block in html.Split("<div class=\"result row\"").Skip(1))
         {
+            if (requiredChips is not null && !requiredChips.Any(c => block.Contains($"/packs/chip/{c}\"", StringComparison.OrdinalIgnoreCase)))
+                continue;
             var title = Regex.Match(block, "<a href=\"[^\"#]*/packs/pack/[^\"#]+\">([^<]+)</a>");
             var download = Regex.Match(block, "class=\"download\" href=\"([^\"]+\\.zip)\"");
             if (title.Success && download.Success)

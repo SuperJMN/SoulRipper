@@ -98,6 +98,30 @@ Dream Land (GB); Super Mario Bros. 1 and 3, Mega Man 2, Zelda (NES).
   artifacts; Mega Man 2 (Capcom, count-indexed buffer enqueued via `$C051`)
   now rips 18 music, 7 jingles and 35 sfx (25 named) with `C051 = FF`
   silence rebase.
+- Bank-aware driver isolation, bounded silence probing and early routine
+  fallback (Sunsoft, Natsume): `Analyze` records 4-byte code fingerprints
+  for the sound driver's ROM bank so `InDriver` no longer mistakes game
+  code in other switchable banks sharing `$8000-$BFFF` for the driver
+  (freezing Mr. Gimmick's intro cutscene timers instead of cutting off all
+  14 stage themes at 54.3 s); `RebaseOnSilence` caps non-common silence
+  probes at 64 values across triggers; `Discovery` probes sound routines
+  before capturing unsilenced RAM triggers and whenever RAM yields fewer
+  than two looping music tracks (escaping pause/mode flags like Mr.
+  Gimmick `$0071`); `ProbeCall` rejects non-driver hardware/mapper writers
+  (Journey to Silius `$C6ED` MMC1 bank switcher), and `ProcessPool`
+  respawns workers after native emulator crashes during speculative probes.
+  Journey to Silius now rips in 3.7 min (7 music, 8 jingles, 24 sfx, all
+  13 names matched, DMC bass preserved), Mr. Gimmick (Mapper 69) in 4.1
+  min (17/17 looped music, 6 jingles, 85 sfx), and Shatterhand in 3.5 min
+  (12/12 looped music, 4 jingles, 152 sfx via `00F0 = 0F`).
+- Online hints for PAL chips and alternative regional titles: `VgmRips`
+  now covers PAL/variant chip slugs (`nes-apu-rp2a07`, `nes-apu-n2a07`,
+  `game-boy-dmg-lr35092`) and falls back to `/packs/search` filtered by
+  chip; `GameHints` searches word initials and remaining letters on
+  joshw.info with regional tie-breaking (`Gimmick! EUR [Mr. Gimmick]`);
+  `TrackPairing.PairByMelody` falls back to PAL/NTSC clock-scaled semitone
+  matching so PAL ROMs pair with NTSC VGM packs (Mr. Gimmick gets 18 of
+  20 vgmrips.net track names).
 - Emulator libraries published to NuGet (`Zafiro.GameBoy.Debug.Emulator`,
   `Zafiro.Nes.Debug.Emulator`); public repository; Fleet project; first
   release (0.1.0, tagged).

@@ -161,26 +161,104 @@ internal sealed class GameHints
         return null;
     }
 
-    // URL of the best-matching set on joshw.info, or null.
+    // URL of the best-matching set on joshw.info, or null. Checks the game's
+    // own initial and the initials of other title words first (e.g. "Mr. Gimmick"
+    // -> "m/", "g/" for "Gimmick! EUR [Mr. Gimmick]"); if none match, scans the
+    // remaining index letters and picks the global best match so alternative
+    // regional titles in brackets are found without letting an earlier 0.91 hit
+    // beat a later 1.0 exact match.
     private static string? FindRip(HttpClient http, string game, string system)
     {
         var target = Titles.Normalize(game);
         if (target.Length == 0)
             return null;
-        var letter = char.IsAsciiLetter(target[0]) ? target[..1] : "0-9";
-        var index = RipSites[system] + letter + "/";
-        var html = File.ReadAllText(Get(http, index, Path.Combine(CacheDir, "index", system, letter + ".html")), Encoding.Latin1);
+        var preferredRegion = RegionTag(game);
+        var (priority, fallback) = SearchLetters(game);
 
+        string? Search(IEnumerable<string> letters)
+        {
+            (string Url, double Score, bool RegionMatch)? best = null;
+            foreach (var letter in letters)
+            {
+                var index = RipSites[system] + letter + "/";
+                var path = Path.Combine(CacheDir, "index", system, letter + ".html");
+                string html;
+                try
+                {
+                    html = File.ReadAllText(Get(http, index, path), Encoding.Latin1);
+                }
+                catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                    File.WriteAllText(path, "");
+                    continue;
+                }
+                if (BestRipIn(html, target, preferredRegion) is { } hit
+                    && (best is null || hit.Score > best.Value.Score
+                        || hit.Score == best.Value.Score && hit.RegionMatch && !best.Value.RegionMatch))
+                {
+                    best = (index + hit.Href, hit.Score, hit.RegionMatch);
+                    if (best.Value.Score >= 1.0 && (preferredRegion is null || best.Value.RegionMatch))
+                        return best.Value.Url;
+                }
+            }
+            return best?.Url;
+        }
+
+        return Search(priority) ?? Search(fallback);
+    }
+
+    internal static (List<string> Priority, List<string> Fallback) SearchLetters(string game)
+    {
+        static string Bucket(char c) => char.IsAsciiLetter(c) ? char.ToLowerInvariant(c).ToString() : "0-9";
+        var priority = new List<string>();
+        void AddPriority(string b) { if (!priority.Contains(b)) priority.Add(b); }
+
+        var target = Titles.Normalize(game);
+        if (target.Length > 0) AddPriority(Bucket(target[0]));
+        foreach (Match word in Regex.Matches(Titles.DisplayName(game), "[A-Za-z0-9]+"))
+            AddPriority(Bucket(word.Value[0]));
+
+        var fallback = Enumerable.Range('a', 26).Select(c => ((char)c).ToString()).Append("0-9")
+            .Where(b => !priority.Contains(b)).ToList();
+        return (priority, fallback);
+    }
+
+    internal static (string Href, double Score, bool RegionMatch)? BestRipIn(
+        string html, string normalizedTarget, string? preferredRegion = null)
+    {
         string? best = null;
         var bestScore = 0.0;
+        var bestRegionMatch = false;
         foreach (Match m in Regex.Matches(html, "href=\"([^\"?/][^\"]*\\.7z)\""))
-            foreach (var title in Titles.RipTitles(m.Groups[1].Value))
+        {
+            var href = m.Groups[1].Value;
+            var decoded = Uri.UnescapeDataString(href);
+            var regionMatch = preferredRegion is not null
+                && Regex.IsMatch(decoded, $@"\b{preferredRegion}\b", RegexOptions.IgnoreCase);
+            foreach (var title in Titles.RipTitles(href))
             {
-                var score = SequenceMatcher.Ratio(target.ToCharArray(), Titles.Normalize(title).ToCharArray());
-                if (score > bestScore)
-                    (best, bestScore) = (m.Groups[1].Value, score);
+                var score = SequenceMatcher.Ratio(normalizedTarget.ToCharArray(), Titles.Normalize(title).ToCharArray());
+                if (score > bestScore || score == bestScore && regionMatch && !bestRegionMatch)
+                    (best, bestScore, bestRegionMatch) = (href, score, regionMatch);
             }
-        return best is not null && bestScore >= 0.9 ? index + best : null;
+        }
+        return best is not null && bestScore >= 0.9 ? (best, bestScore, bestRegionMatch) : null;
+    }
+
+    private static string? RegionTag(string noIntroName)
+    {
+        if (noIntroName.Contains("(Europe)", StringComparison.OrdinalIgnoreCase)) return "EUR";
+        if (noIntroName.Contains("(Japan)", StringComparison.OrdinalIgnoreCase)) return "JPN";
+        if (noIntroName.Contains("(USA)", StringComparison.OrdinalIgnoreCase)) return "USA";
+        foreach (Match m in Regex.Matches(noIntroName, @"\(([^)]+)\)"))
+        {
+            var tag = m.Groups[1].Value;
+            if (Regex.IsMatch(tag, @"\bEurope\b", RegexOptions.IgnoreCase)) return "EUR";
+            if (Regex.IsMatch(tag, @"\bJapan\b", RegexOptions.IgnoreCase)) return "JPN";
+            if (Regex.IsMatch(tag, @"\bUSA\b", RegexOptions.IgnoreCase)) return "USA";
+        }
+        return null;
     }
 
     // Downloads and unpacks a set; returns its directory.
@@ -205,7 +283,7 @@ internal sealed class GameHints
         using (var response = http.GetAsync(url).GetAwaiter().GetResult())
         {
             if (response.StatusCode != HttpStatusCode.OK)
-                throw new HttpRequestException($"{url}: {(int)response.StatusCode} {response.ReasonPhrase}");
+                throw new HttpRequestException($"{url}: {(int)response.StatusCode} {response.ReasonPhrase}", null, response.StatusCode);
             using var file = File.Create(path + ".part");
             response.Content.CopyTo(file, null, CancellationToken.None);
         }

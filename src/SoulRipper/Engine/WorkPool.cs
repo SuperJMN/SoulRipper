@@ -71,13 +71,16 @@ internal sealed class LocalPool(Prober prober) : IWorkPool
 // because the AprNes core is static.
 internal sealed class ProcessPool : IWorkPool
 {
+    private const int MaxRespawns = 16;
+
     private readonly List<Worker> workers;
+    private int respawns;
 
     public ProcessPool(int count, string rom, Reach reach, DiscoverySettings s)
     {
         var reachJson = System.Text.Json.JsonSerializer.Serialize(reach.ToJson());
         workers = Enumerable.Range(0, count)
-            .Select(_ => new Worker(rom, reachJson, s.MaxFrames)).ToList();
+            .Select(_ => new Worker(this, rom, reachJson, s.MaxFrames)).ToList();
     }
 
     public List<JsonNode?> Map(string op, ProbeContext ctx, IReadOnlyList<JsonNode?> items, Action<int, JsonNode?>? done = null)
@@ -104,13 +107,37 @@ internal sealed class ProcessPool : IWorkPool
         foreach (var w in workers) w.Dispose();
     }
 
+    internal static JsonNode? CrashedResult(string op, JsonNode? item) => op switch
+    {
+        "capture" => null,
+        "silent" => false,
+        "sweep" => JsonNode.Parse(Wire.Encode(new AddressReport(
+            (ushort)(int)JsonNode.Parse(item!.ToJsonString())!, 0, new())).ToJsonString()),
+        _ => throw new InvalidOperationException($"worker died during {op}"),
+    };
+
     private sealed class Worker : IDisposable
     {
-        private readonly Process process;
-        private readonly ConcurrentQueue<string> stderrTail = new();
+        private readonly ProcessPool pool;
+        private readonly string rom;
+        private readonly string reachJson;
+        private readonly int maxFrames;
+        private ConcurrentQueue<string> stderrTail = new();
+        private Process process = null!;
 
-        public Worker(string rom, string reachJson, int maxFrames)
+        public Worker(ProcessPool pool, string rom, string reachJson, int maxFrames)
         {
+            this.pool = pool;
+            this.rom = rom;
+            this.reachJson = reachJson;
+            this.maxFrames = maxFrames;
+            Start();
+        }
+
+        private void Start()
+        {
+            var tail = new ConcurrentQueue<string>();
+            stderrTail = tail;
             var dll = typeof(Program).Assembly.Location;
             var host = Environment.ProcessPath!;
             var info = new ProcessStartInfo(host)
@@ -129,8 +156,8 @@ internal sealed class ProcessPool : IWorkPool
             process.ErrorDataReceived += (_, e) =>
             {
                 if (e.Data == null) return;
-                stderrTail.Enqueue(e.Data);
-                while (stderrTail.Count > 20) stderrTail.TryDequeue(out string? _);
+                tail.Enqueue(e.Data);
+                while (tail.Count > 20) tail.TryDequeue(out string? _);
             };
             process.BeginErrorReadLine();
         }
@@ -138,21 +165,42 @@ internal sealed class ProcessPool : IWorkPool
         public JsonNode? Call(string op, string ctxJson, JsonNode? item)
         {
             var request = $"{{\"op\":\"{op}\",\"ctx\":{ctxJson},\"item\":{item?.ToJsonString() ?? "null"}}}";
-            process.StandardInput.WriteLine(request);
-            process.StandardInput.Flush();
-            var line = process.StandardOutput.ReadLine()
-                       ?? throw new InvalidOperationException("worker died: " + string.Join(" | ", stderrTail));
+            string? line;
+            try
+            {
+                process.StandardInput.WriteLine(request);
+                process.StandardInput.Flush();
+                line = process.StandardOutput.ReadLine();
+            }
+            catch (IOException)
+            {
+                line = null;
+            }
+            if (line is null)
+            {
+                // Speculative probes can corrupt mapper state and trigger an
+                // uncatchable native fault (e.g. AprNes Mapper001 out-of-range
+                // PRG bank); replace the worker and treat that item as crashed.
+                try { process.WaitForExit(500); } catch (InvalidOperationException) { }
+                var diag = string.Join(" | ", stderrTail);
+                DisposeProcess();
+                if (Interlocked.Increment(ref pool.respawns) > MaxRespawns)
+                    throw new InvalidOperationException("worker died: " + diag);
+                Console.Error.WriteLine($"  worker crashed during {op} ({item?.ToJsonString() ?? "null"}); respawning");
+                Start();
+                return CrashedResult(op, item);
+            }
             var response = JsonNode.Parse(line)!;
             if (!(bool)response["ok"]!)
                 throw new InvalidOperationException("worker failed: " + (string?)response["error"]);
             return response["result"];
         }
 
-        public void Dispose()
+        private void DisposeProcess()
         {
+            try { process.StandardInput.Close(); } catch (InvalidOperationException) { } catch (IOException) { }
             try
             {
-                process.StandardInput.Close();
                 if (!process.WaitForExit(5000)) process.Kill();
             }
             catch (InvalidOperationException)
@@ -160,5 +208,7 @@ internal sealed class ProcessPool : IWorkPool
             }
             process.Dispose();
         }
+
+        public void Dispose() => DisposeProcess();
     }
 }

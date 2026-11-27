@@ -18,9 +18,14 @@ internal sealed class DiscoverySettings
     public bool Rebase { get; init; } = true;
 }
 
+// A 4-byte code fingerprint captured at an APU-writing PC while the sound
+// driver's bank is mapped, so bank-switched game code sharing the same CPU
+// window ($8000-$BFFF NES, $4000-$7FFF GB) is not mistaken for the driver.
+internal sealed record DriverBank(ushort Address, uint Bytes);
+
 // Where the sound driver is: the code that writes the sound chip, the stack
 // range, and the RAM the driver reads (candidate request bytes).
-internal sealed record Analysis(ushort[] ApuPcs, int MinSp, int MaxSp, List<ushort> Candidates);
+internal sealed record Analysis(ushort[] ApuPcs, int MinSp, int MaxSp, List<ushort> Candidates, DriverBank[]? DriverBanks = null);
 
 internal sealed record Response(byte Value, ulong Signature, bool Consumed, bool Restored);
 
@@ -102,7 +107,8 @@ internal sealed record ConsumerRule(ushort Address, ushort Pc, byte IdleValue);
 internal sealed record ProbeContext(
     ushort[] ApuPcs, int MinSp, int MaxSp, ushort[] Guarded,
     IReadOnlyList<(ushort Address, byte Value)>? Rebase, Dictionary<ushort, byte> Frozen, ulong BaseChecksum,
-    IReadOnlyList<ConsumerRule>? Consumers = null, bool CallMode = false, ushort[]? DriverReads = null);
+    IReadOnlyList<ConsumerRule>? Consumers = null, bool CallMode = false, ushort[]? DriverReads = null,
+    IReadOnlyList<DriverBank>? DriverBanks = null);
 
 // Runs sound experiments on one machine: from a base state, poke a byte and
 // watch what the sound chip does.
@@ -119,6 +125,7 @@ internal sealed class Prober
     private HashSet<ushort> guarded = new();
     private HashSet<(ushort Address, ushort Pc, byte IdleValue)> consumers = new();
     private HashSet<ushort> driverReads = new();
+    private DriverBank[] driverBanks = Array.Empty<DriverBank>();
     private readonly Dictionary<ushort, byte> guardValues = new();
     private (Timeline Timeline, ushort[] StateRam, bool Silent)? reference;
     private bool guarding;
@@ -146,6 +153,7 @@ internal sealed class Prober
         consumers = (context.Consumers ?? Array.Empty<ConsumerRule>())
             .Select(r => (r.Address, r.Pc, r.IdleValue)).ToHashSet();
         driverReads = (context.DriverReads ?? Array.Empty<ushort>()).ToHashSet();
+        driverBanks = (context.DriverBanks ?? Array.Empty<DriverBank>()).ToArray();
         reference = null;
         baseState = reachState;
         if (context.Rebase is { } pokes)
@@ -170,6 +178,8 @@ internal sealed class Prober
     public Analysis Analyze()
     {
         var pcs = new HashSet<ushort>();
+        var slotPc = new Dictionary<int, ushort>();
+        var banks = new HashSet<DriverBank>();
         var callers = new HashSet<ushort>();
         var seenStacks = new HashSet<(ushort Pc, ushort Sp)>();
         var readers = new Dictionary<ushort, HashSet<ushort>>();
@@ -179,7 +189,13 @@ internal sealed class Prober
         Observed((a, _, pc) =>
         {
             if (!m.Chip.Owns(a)) return;
-            pcs.Add(pc);
+            if (pcs.Add(pc) && !m.IsWorkRam(pc))
+            {
+                var slot = pc >> 12;
+                if (!slotPc.TryGetValue(slot, out var probePc))
+                    slotPc[slot] = probePc = pc;
+                banks.Add(new DriverBank(probePc, CodeBytes(probePc)));
+            }
             if (!seenStacks.Add((pc, m.StackPointer))) return;
             var current = pc;
             foreach (var (site, target) in m.CallStack())
@@ -206,25 +222,65 @@ internal sealed class Prober
             }
         });
 
-        ctx = ctx with { ApuPcs = pcs.Order().ToArray(), MinSp = minSp, MaxSp = maxSp };
+        driverBanks = banks.OrderBy(b => b.Address).ThenBy(b => b.Bytes).ToArray();
+        ctx = ctx with { ApuPcs = pcs.Order().ToArray(), MinSp = minSp, MaxSp = maxSp, DriverBanks = driverBanks };
         var callerPcs = callers.Order().ToArray();
         // Driver-read bytes come first so caller-window bytes (often in zero
         // page) never push real driver candidates past MaxCandidates.
         var inDriver = readers
-            .Where(r => OffStack(r.Key) && (ctx.ApuPcs.Length == 0 || r.Value.Any(InDriver)))
+            .Where(r => OffStack(r.Key) && (ctx.ApuPcs.Length == 0 || r.Value.Any(InDriverAddress)))
             .Select(r => r.Key).Order();
         var nearCaller = ctx.ApuPcs.Length == 0
             ? Enumerable.Empty<ushort>()
             : readers
-                .Where(r => OffStack(r.Key) && !r.Value.Any(InDriver) && r.Value.Any(pc => Near(callerPcs, pc, s.CallerWindow)))
+                .Where(r => OffStack(r.Key) && !r.Value.Any(InDriverAddress) && r.Value.Any(pc => Near(callerPcs, pc, s.CallerWindow)))
                 .Select(r => r.Key).Order();
         var candidates = inDriver.Concat(nearCaller).Take(s.MaxCandidates).Order().ToList();
-        return new Analysis(ctx.ApuPcs, minSp, maxSp, candidates);
+        return new Analysis(ctx.ApuPcs, minSp, maxSp, candidates, driverBanks);
     }
 
     private bool OffStack(ushort a) => a < ctx.MinSp - 0x40 || a > ctx.MaxSp + 0x08;
 
-    private bool InDriver(ushort pc) => Near(ctx.ApuPcs, pc, s.DriverWindow);
+    private bool InDriverAddress(ushort pc) => Near(ctx.ApuPcs, pc, s.DriverWindow);
+
+    private bool InDriver(ushort pc) => InDriverAddress(pc) && DriverBankMapped(pc);
+
+    // Checks that the sound driver's ROM bank is actually mapped into the
+    // window around `pc`. Without this, game code in another switchable bank at
+    // $8000-$BFFF (Mr. Gimmick intro banks $10/$1B-$1E, Journey to Silius) is
+    // misclassified as driver code and its timers are never frozen. Prefer a
+    // fingerprint in `pc`'s own 4 KB slot when one exists before falling back
+    // to neighboring slots within DriverWindow.
+    private bool DriverBankMapped(ushort pc)
+    {
+        if (driverBanks.Length == 0 || m.IsWorkRam(pc))
+            return true;
+        var slot = pc >> 12;
+        var anySameSlot = false;
+        foreach (var b in driverBanks)
+        {
+            if (b.Address >> 12 != slot) continue;
+            anySameSlot = true;
+            if (CodeBytes(b.Address) == b.Bytes) return true;
+        }
+        if (anySameSlot)
+            return false;
+        var anyNear = false;
+        foreach (var b in driverBanks)
+        {
+            if (Math.Abs(b.Address - pc) > s.DriverWindow) continue;
+            anyNear = true;
+            if (CodeBytes(b.Address) == b.Bytes) return true;
+        }
+        return !anyNear;
+    }
+
+    private uint CodeBytes(ushort pc)
+    {
+        var p = Math.Min(pc, (ushort)0xFFFC);
+        return (uint)(m.Peek(p) | (m.Peek((ushort)(p + 1)) << 8)
+            | (m.Peek((ushort)(p + 2)) << 16) | (m.Peek((ushort)(p + 3)) << 24));
+    }
 
     private static bool Near(ushort[] sorted, ushort pc, int window)
     {
@@ -305,6 +361,7 @@ internal sealed class Prober
         Timeline t;
         var calledDriver = false;
         var touchedDriverRam = false;
+        var touchedHardware = false;
         var externalRamWrites = new HashSet<ushort>();
         var callWrites = new List<(ushort Address, byte Value)>();
         var previous = m.Write;
@@ -318,11 +375,21 @@ internal sealed class Prober
                 calledDriver = true;
                 return;
             }
-            if (m.IsWorkRam(a) && OffStack(a))
+            if (m.IsWorkRam(a))
             {
-                externalRamWrites.Add(a);
-                if (driverReads.Contains(a))
-                    touchedDriverRam = true;
+                if (OffStack(a))
+                {
+                    externalRamWrites.Add(a);
+                    if (driverReads.Contains(a))
+                        touchedDriverRam = true;
+                }
+            }
+            else if (OffStack(a))
+            {
+                // Non-sound hardware (mapper/bank registers, PPU, OAM, IO):
+                // disqualifies pure bank-switch helpers (Journey to Silius $C6ED)
+                // that never enter the sound driver.
+                touchedHardware = true;
             }
         };
         try
@@ -333,11 +400,12 @@ internal sealed class Prober
             // Accept routines that either enter the sound driver directly
             // without scribbling all over game WRAM (Kirby's Adventure $F826/
             // $F859) or only write a handful of RAM bytes including one the
-            // driver/dispatcher reads (Mega Man 2 $C051 enqueue). Rejects game
-            // object spawners (Kirby $CB78/$CBA2) that write dozens of WRAM
-            // bytes even if the spawned object happens to trigger an SFX.
+            // driver/dispatcher reads, without touching non-sound hardware
+            // (Mega Man 2 $C051, Journey to Silius $EA67, Mr. Gimmick $F2A3).
+            // Rejects game object spawners (Kirby $CB78/$CBA2) and bank-switch
+            // helpers (Journey to Silius $C6ED).
             var maxExternal = calledDriver ? 16 : 8;
-            if (!returned || !(calledDriver || touchedDriverRam) || externalRamWrites.Count > maxExternal)
+            if (!returned || !(calledDriver || touchedDriverRam && !touchedHardware) || externalRamWrites.Count > maxExternal)
                 return null;
             t = Recorder.Record(m, s.ProbeFrames);
             if (callWrites.Count > 0 && t.Count > 0)

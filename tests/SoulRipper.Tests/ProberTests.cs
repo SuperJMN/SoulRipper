@@ -346,4 +346,309 @@ public class ProberTests
         Assert.Contains((0, (ushort)0x4003, (byte)0x07), sound.Writes);
         Assert.Contains(sound.Samples!, s => s.Frame == 0 && s.Address == 0xC000 && s.Data[0] == 0xAA);
     }
+
+    [Fact]
+    public void Sweep_in_call_mode_rejects_non_driver_routines_that_write_hardware_registers()
+    {
+        // Models Journey to Silius $C6ED (MMC1 PRG bank switch): writes a
+        // driver-read RAM variable ($00F1) plus mapper register $FFFF without
+        // ever entering the sound driver.
+        var machine = new FakeMachine();
+        machine.OnCall = (m, addr, arg) =>
+        {
+            if (addr != 0xC6ED) return false;
+            m.BusWrite(0x00F1, arg, 0xC6EE);
+            m.BusWrite(0xFFFF, arg, 0xC6F6); // cartridge mapper register
+            return true;
+        };
+        machine.OnFrame = (m, _) =>
+        {
+            var bank = m.BusRead(0x00F1, 0xC120);
+            m.BusWrite(0x4002, bank, 0x8353);
+        };
+
+        var prober = new Prober(machine, machine.SaveState(), new DiscoverySettings { ProbeFrames = 4 });
+        prober.Apply(new ProbeContext(
+            new ushort[] { 0x8353 }, 0x01F0, 0x01FF, Array.Empty<ushort>(), null, new(), 0,
+            CallMode: true, DriverReads: new ushort[] { 0x00F1 }));
+
+        var report = prober.Sweep(new ushort[] { 0xC6ED })[0];
+
+        Assert.Empty(report.Responses);
+        Assert.False(report.IsTrigger);
+    }
+
+    [Fact]
+    public void Sweep_in_call_mode_accepts_a_bank_switching_trampoline_that_enters_the_driver()
+    {
+        // A trampoline (Kirby $F859 / GB bank-0 trampoline) writes a mapper
+        // register before calling into the driver's bank; that must be accepted
+        // because execution enters the driver itself.
+        var machine = new FakeMachine();
+        machine.Poke(0x8105, 0x8D);
+        machine.OnCall = (m, addr, arg) =>
+        {
+            if (addr != 0xF859) return false;
+            m.BusWrite(0x8000, 0x1E, 0xF85B); // bank switch
+            m.BusWrite(0x0600, arg, 0x8105);  // inside driver bank
+            return true;
+        };
+        machine.OnFrame = (m, _) =>
+        {
+            var song = m.BusRead(0x0600, 0x8158);
+            m.BusWrite(0x4002, song, 0x81D8);
+        };
+
+        var prober = new Prober(machine, machine.SaveState(), new DiscoverySettings { ProbeFrames = 4 });
+        prober.Apply(new ProbeContext(
+            new ushort[] { 0x81D8 }, 0x01F0, 0x01FF, Array.Empty<ushort>(), null, new(), 0,
+            CallMode: true, DriverBanks: new[] { new DriverBank(0x8105, 0x0000008Du) }));
+
+        var report = prober.Sweep(new ushort[] { 0xF859 })[0];
+
+        Assert.True(report.IsTrigger);
+        Assert.True(report.IsCall);
+    }
+
+    [Fact]
+    public void Discovery_keeps_ram_state_when_early_routine_probe_finds_no_silencing_routine()
+    {
+        // When RAM has unsilenced triggers and routines fail to silence (or
+        // find nothing), Discovery falls back to RAM capture and keeps RAM's
+        // Addresses and Rebased state.
+        var machine = new FakeMachine { Routines = new ushort[] { 0xE000 } };
+        machine.Poke(0x0600, 1); // active music, no stop command anywhere
+        machine.OnCall = (_, _, _) => false;
+        machine.OnFrame = (m, f) =>
+        {
+            var sfx = m.BusRead(0x0040, 0x8200);
+            if (sfx != 0)
+            {
+                m.BusWrite(0x0040, 0, 0x8204);
+                if (sfx is 0x01 or 0x02) m.BusWrite(0x400E, sfx, 0x8210);
+            }
+            m.Audible = true;
+            m.BusWrite(0x4002, (byte)(f & 0x07), 0x8220);
+        };
+
+        var settings = new DiscoverySettings
+        {
+            AnalysisFrames = 6,
+            ProbeFrames = 4,
+            ReferenceFrames = 20,
+            MaxFrames = 30,
+            QuietFrames = 4,
+            MusicMinFrames = 20,
+        };
+        var prober = new Prober(machine, machine.SaveState(), settings);
+        using var pool = new LocalPool(prober);
+        var discovery = new Discovery(prober, pool, settings, _ => { });
+
+        var sounds = discovery.Run();
+
+        Assert.Null(discovery.Rebased);
+        Assert.Contains(discovery.Addresses, a => a.Address == 0x0040 && a.IsTrigger);
+        Assert.Equal(new[] { "0040_01", "0040_02" }, sounds.Select(s => s.Id).Order().ToArray());
+    }
+
+    [Fact]
+    public void GameOwnedRam_freezes_writes_from_other_banks_sharing_the_drivers_address_window()
+    {
+        // Models Mr. Gimmick: bank 7 (sound driver) and bank $1B (intro logic)
+        // both map into $8000-$9FFF. Writes from $8200 while another bank is
+        // mapped must be frozen as game RAM, while driver writes stay unfrozen.
+        var machine = new FakeMachine();
+        void MapBank(byte b0, byte b1, byte b2, byte b3)
+        {
+            machine.Poke(0x849E, b0);
+            machine.Poke(0x849F, b1);
+            machine.Poke(0x84A0, b2);
+            machine.Poke(0x84A1, b3);
+        }
+
+        MapBank(0x8D, 0x00, 0x40, 0xEA);
+        machine.OnFrame = (m, f) =>
+        {
+            // Sound driver bank mapped at $8000-$9FFF.
+            MapBank(0x8D, 0x00, 0x40, 0xEA);
+            m.BusWrite(0x0600, (byte)(f & 0x0F), 0x8100);
+            m.BusWrite(0x4002, 0x20, 0x849E);
+
+            // Game intro bank mapped into the exact same $8000-$9FFF window.
+            MapBank(0xA9, 0x01, 0x85, 0x42);
+            m.BusWrite(0x0042, (byte)(f & 0xFF), 0x8200);
+        };
+
+        var prober = new Prober(machine, machine.SaveState(), new DiscoverySettings { AnalysisFrames = 4 });
+        var analysis = prober.Analyze();
+        prober.Apply(new ProbeContext(analysis.ApuPcs, analysis.MinSp, analysis.MaxSp,
+            Array.Empty<ushort>(), null, new(), 0, DriverBanks: analysis.DriverBanks));
+
+        var frozen = prober.GameOwnedRam();
+
+        Assert.True(frozen.ContainsKey(0x0042));
+        Assert.False(frozen.ContainsKey(0x0600));
+    }
+
+    [Fact]
+    public void Discovery_caps_slow_silence_probes_and_tries_routines_before_unsilenced_ram_capture()
+    {
+        // Models Sunsoft drivers (Journey to Silius): multiple channel-state
+        // false triggers produce >64 non-silencing distinct responses in RAM
+        // while music plays, whereas routine $EA67 silences on $FF and plays
+        // real music.
+        var machine = new FakeMachine { Routines = new ushort[] { 0xEA67 } };
+        machine.Poke(0x0600, 1); // title music playing
+
+        machine.OnCall = (m, addr, arg) =>
+        {
+            if (addr != 0xEA67) return false;
+            if (arg == 0xFF) m.BusWrite(0x0600, 0, 0x80A5);
+            else if (arg is 0x01 or 0x02) m.BusWrite(0x0600, (byte)(arg + 1), 0x80A5);
+            return true;
+        };
+
+        machine.OnFrame = (m, f) =>
+        {
+            var song = m.BusRead(0x0600, 0x816D);
+            m.Audible = song != 0;
+            if (song != 0)
+            {
+                // 4 false channel-state bytes ($00EB..$00EE): each yields 30
+                // distinct chip perturbations (120 total > 64 cap) and resets
+                // to 0, without ever silencing the active music.
+                byte mix = 0;
+                for (ushort a = 0x00EB; a <= 0x00EE; a++)
+                {
+                    var v = m.BusRead(a, 0x8189);
+                    if (v is >= 1 and <= 30) mix ^= v;
+                    if (v != 0) m.BusWrite(a, 0, 0x818D);
+                }
+                m.BusWrite(0x4002, (byte)((f & 0x07) + song * 16 + mix), 0x8353);
+                m.BusWrite(0x4006, (byte)((f & 0x03) + song * 8), 0x8358);
+            }
+            else
+            {
+                m.BusWrite(0x4015, 0x00, 0x8353);
+            }
+        };
+
+        var settings = new DiscoverySettings
+        {
+            AnalysisFrames = 6,
+            ProbeFrames = 4,
+            ReferenceFrames = 30,
+            MaxFrames = 60,
+            QuietFrames = 6,
+            MusicMinFrames = 20,
+        };
+        var prober = new Prober(machine, machine.SaveState(), settings);
+        using var inner = new LocalPool(prober);
+        var spy = new SpyPool(inner);
+        var discovery = new Discovery(prober, spy, settings, _ => { });
+
+        var sounds = discovery.Run();
+
+        Assert.Equal("EA67 = FF", discovery.Rebased);
+        Assert.Equal(new[] { "EA67_01", "EA67_02" }, sounds.Select(s => s.Id).Order().ToArray());
+        // Slow silence probing on the 120 unsilenced RAM responses was capped at 64.
+        Assert.InRange(spy.RamSilentItems, 1, 80);
+        // None of the unsilenced false RAM triggers were captured.
+        Assert.DoesNotContain(spy.CapturedAddresses, a => a is >= 0x00EB and <= 0x00EE);
+    }
+
+    [Fact]
+    public void Discovery_falls_back_to_routines_when_ram_trigger_produces_no_looping_music()
+    {
+        // Models Mr. Gimmick $0071: a RAM mode/pause flag silences on $FE and
+        // replays non-looping jingle variants (0 looping music), hiding the
+        // real sound routine $F2A3.
+        var machine = new FakeMachine { Routines = new ushort[] { 0xF2A3 } };
+        machine.Poke(0x0600, 1);    // active track (1..3)
+        machine.Poke(0x0601, 0xFF); // looping music initially so base state is not silent
+
+        machine.OnCall = (m, addr, arg) =>
+        {
+            if (addr != 0xF2A3) return false;
+            if (arg == 0xFF)
+            {
+                m.BusWrite(0x0600, 0, 0x8077);
+                m.BusWrite(0x0601, 0, 0x8077);
+            }
+            else if (arg is 0x01 or 0x02)
+            {
+                m.BusWrite(0x0600, (byte)(arg + 1), 0x80FC);
+                m.BusWrite(0x0601, 0xFF, 0x80FC); // looping song
+            }
+            return true;
+        };
+
+        machine.OnFrame = (m, f) =>
+        {
+            var flag = m.BusRead(0x0071, 0x8246);
+            if (flag == 0xFE)
+            {
+                m.BusWrite(0x0600, 0, 0x824A);
+                m.BusWrite(0x0071, 0, 0x824E);
+            }
+            else if (flag is 0x01 or 0x03)
+            {
+                // Resumes a finite jingle (24 frames -> jingle, not looping music).
+                m.BusWrite(0x0600, (byte)(flag == 0x01 ? 10 : 11), 0x824A);
+                m.BusWrite(0x0601, 24, 0x824C);
+                m.BusWrite(0x0071, 0, 0x824E);
+            }
+
+            var song = m.BusRead(0x0600, 0x8250);
+            var rem = m.BusRead(0x0601, 0x8254);
+            m.Audible = song != 0 && rem > 0;
+            if (song != 0 && rem > 0)
+            {
+                m.BusWrite(0x4002, (byte)((f & 0x07) + song * 8), 0x849E);
+                m.BusWrite(0x4006, (byte)((f & 0x03) + song * 4), 0x84BA);
+                if (rem != 0xFF) m.BusWrite(0x0601, (byte)(rem - 1), 0x8258);
+            }
+            else
+            {
+                m.BusWrite(0x4015, 0x00, 0x849E);
+            }
+        };
+
+        var settings = new DiscoverySettings
+        {
+            AnalysisFrames = 6,
+            ProbeFrames = 4,
+            ReferenceFrames = 30,
+            MaxFrames = 60,
+            QuietFrames = 6,
+            MusicMinFrames = 20,
+        };
+        var prober = new Prober(machine, machine.SaveState(), settings);
+        using var pool = new LocalPool(prober);
+        var discovery = new Discovery(prober, pool, settings, _ => { });
+
+        var sounds = discovery.Run();
+
+        Assert.Equal("F2A3 = FF", discovery.Rebased);
+        Assert.Equal(new[] { "F2A3_01", "F2A3_02" }, sounds.Select(s => s.Id).Order().ToArray());
+        Assert.All(sounds, s => Assert.Equal("music", s.Kind));
+    }
+
+    private sealed class SpyPool(IWorkPool inner) : IWorkPool
+    {
+        public int RamSilentItems { get; private set; }
+        public List<ushort> CapturedAddresses { get; } = new();
+
+        public List<System.Text.Json.Nodes.JsonNode?> Map(string op, ProbeContext ctx,
+            IReadOnlyList<System.Text.Json.Nodes.JsonNode?> items, Action<int, System.Text.Json.Nodes.JsonNode?>? done = null)
+        {
+            if (op == "silent" && !ctx.CallMode)
+                RamSilentItems += items.Count;
+            if (op == "capture")
+                CapturedAddresses.AddRange(items.Where(i => i is not null).Select(i => (ushort)i![0]!));
+            return inner.Map(op, ctx, items, done);
+        }
+
+        public void Dispose() => inner.Dispose();
+    }
 }

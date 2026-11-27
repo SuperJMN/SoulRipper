@@ -57,28 +57,43 @@ internal static class TrackPairing
 
     // {sound id: title} for VGM pack tracks, which come from another player and
     // so are compared by melody. Best pairs first; each sound and each title
-    // is used once.
+    // is used once. Falls back to PAL<->NTSC clock-scaled semitone comparison
+    // for any remaining tracks (e.g. PAL Mr. Gimmick ROM vs NTSC VGM pack).
     public static Dictionary<string, string> PairByMelody(IReadOnlyList<Sound> sounds, IReadOnlyList<VgmTrack> tracks)
     {
-        var captured = sounds.Select(s => (s.Id, Melody: Melody.Of(s.Writes.Select(w => (w.Address, w.Value)))))
-            .Where(x => x.Melody.Count >= MinNotes).ToList();
-        var scored = new List<(double Score, string Id, string Title)>();
-        foreach (var track in tracks.Where(t => t.Title.Length > 0))
-        {
-            var melody = Melody.Of(track.Writes);
-            if (melody.Count < MinNotes)
-                continue;
-            foreach (var (id, other) in captured)
-                if (melody.Bound(other) >= MelodyThreshold && melody.Similarity(other) is var score && score >= MelodyThreshold)
-                    scored.Add((score, id, track.Title));
-        }
-
         var names = new Dictionary<string, string>();
         var used = new HashSet<string>();
-        foreach (var (_, id, title) in scored.OrderByDescending(x => x.Score)
-                     .ThenBy(x => x.Id, StringComparer.Ordinal).ThenBy(x => x.Title, StringComparer.Ordinal))
-            if (!names.ContainsKey(id) && used.Add(title))
-                names[id] = title;
+
+        void MatchPass(Func<IEnumerable<(ushort Address, byte Value)>, Melody> captureMelody,
+            Func<IEnumerable<(ushort Address, byte Value)>, Melody> trackMelody)
+        {
+            var captured = sounds.Where(s => !names.ContainsKey(s.Id))
+                .Select(s => (s.Id, Melody: captureMelody(s.Writes.Select(w => (w.Address, w.Value)))))
+                .Where(x => x.Melody.Count >= MinNotes).ToList();
+            if (captured.Count == 0)
+                return;
+            var scored = new List<(double Score, string Id, string Title)>();
+            foreach (var track in tracks.Where(t => t.Title.Length > 0 && !used.Contains(t.Title)))
+            {
+                var melody = trackMelody(track.Writes);
+                if (melody.Count < MinNotes)
+                    continue;
+                foreach (var (id, other) in captured)
+                    if (melody.Bound(other) >= MelodyThreshold && melody.Similarity(other) is var score && score >= MelodyThreshold)
+                        scored.Add((score, id, track.Title));
+            }
+            foreach (var (_, id, title) in scored.OrderByDescending(x => x.Score)
+                         .ThenBy(x => x.Id, StringComparer.Ordinal).ThenBy(x => x.Title, StringComparer.Ordinal))
+                if (!names.ContainsKey(id) && used.Add(title))
+                    names[id] = title;
+        }
+
+        MatchPass(Melody.Of, Melody.Of);
+        if (names.Count < sounds.Count && used.Count < tracks.Count)
+        {
+            MatchPass(w => Melody.OfSemitones(w, Melody.NesPalToNtsc), w => Melody.OfSemitones(w));
+            MatchPass(w => Melody.OfSemitones(w), w => Melody.OfSemitones(w, Melody.NesPalToNtsc));
+        }
         return names;
     }
 

@@ -26,7 +26,7 @@ internal sealed class Discovery(Prober local, IWorkPool pool, DiscoverySettings 
     public List<Sound> Run(IReadOnlyList<ushort>? queues = null, IReadOnlyList<ushort>? extra = null,
         Analysis? analysis = null, object? idleState = null)
     {
-        var (apuPcs, minSp, maxSp, candidates) = analysis ?? local.Analyze();
+        var (apuPcs, minSp, maxSp, candidates, driverBanks) = analysis ?? local.Analyze();
         ApuWriterPcs = apuPcs;
         if (apuPcs.Length == 0)
             log("warning: the driver wrote no sound registers during analysis; probing all RAM it touched");
@@ -35,59 +35,120 @@ internal sealed class Discovery(Prober local, IWorkPool pool, DiscoverySettings 
         log($"driver: {apuPcs.Length} sound-writing PCs ({string.Join(" ", apuPcs.Take(8).Select(p => p.ToString("X4")))}), " +
             $"{candidates.Count} candidate bytes");
 
-        var ctx = Applied(new ProbeContext(apuPcs, minSp, maxSp, Array.Empty<ushort>(), null, new(), 0));
-        Addresses = Sweep(ctx, candidates);
-        var triggers = Addresses.Where(a => a.IsTrigger).ToList();
+        var ctx = Applied(new ProbeContext(apuPcs, minSp, maxSp, Array.Empty<ushort>(), null, new(), 0,
+            DriverBanks: driverBanks));
+        var ramAddresses = Sweep(ctx, candidates);
+        Addresses = ramAddresses;
+        var triggers = ramAddresses.Where(a => a.IsTrigger).ToList();
         log($"triggers: {string.Join(", ", triggers.Select(t => $"{t.Address:X4} ({t.Responses.Count} values)"))}");
 
-        var sounds = new List<Sound>();
+        var ramSilent = false;
+        string? ramRebased = null;
         if (triggers.Count > 0)
         {
             ctx = Applied(ctx with { Guarded = triggers.Select(t => t.Address).ToArray(), Consumers = ConsumersOf(triggers) });
             if (s.Rebase)
-                (ctx, triggers) = RebaseOnSilence(ctx, triggers, idleState);
+                (ctx, triggers, ramAddresses, ramRebased, ramSilent) = RebaseOnSilence(ctx, triggers, ramAddresses, idleState);
+            Addresses = ramAddresses;
+            Rebased = ramRebased;
+        }
+
+        // Games that request sounds via a subroutine (Kirby's Adventure $F859,
+        // Mega Man 2 $C051, Sunsoft's Journey to Silius $EA67 / Mr. Gimmick
+        // $F2A3) often expose hundreds of channel-state false positives in RAM
+        // that cannot silence the playing music. Probe sound routines before
+        // running an expensive differential capture on unsilenced RAM triggers.
+        RoutineProbe? routineProbe = null;
+        var triedRoutines = false;
+        if (queues is null && (triggers.Count == 0 || s.Rebase && !ramSilent))
+        {
+            triedRoutines = true;
+            routineProbe = ProbeRoutines(apuPcs, minSp, maxSp, candidates, driverBanks, idleState);
+            if (routineProbe is { } p && (triggers.Count == 0 || p.Silent))
+            {
+                var callSounds = CaptureRoutines(p);
+                if (triggers.Count == 0 || callSounds.Count(x => x.Kind is "music" or "jingle") >= 2)
+                {
+                    if (triggers.Count > 0)
+                        log("using silenced sound routine; skipping unsilenced RAM triggers");
+                    Addresses = p.Addresses;
+                    Rebased = p.Rebased;
+                    return callSounds;
+                }
+                routineProbe = p with { Sounds = callSounds };
+            }
+        }
+
+        var sounds = new List<Sound>();
+        if (triggers.Count > 0)
+        {
+            if (triedRoutines)
+                ctx = Applied(ctx);
             ctx = Applied(ctx with { Frozen = local.GameOwnedRam() });
             log($"freezing {ctx.Frozen.Count} bytes of game state during captures");
             sounds = Capture(ctx, triggers);
         }
 
-        // Games that request sounds by calling a subroutine (Kirby's Adventure
-        // $F826/$F859, Mega Man 2 $C051) have no RAM queue bytes to poke (or at
-        // most a single false trigger re-recording the active title music), so
-        // fall back to probing ROM routines called with an immediate in A.
-        if (queues is null && sounds.Count(x => x.Kind is "music" or "jingle") < 2)
+        // Even when RAM was silent or rebased, a false mode/pause flag in RAM
+        // (Mr. Gimmick $0071 re-playing the title theme as 4 jingles with 0
+        // looping music) or an SFX-only queue can hide a real sound routine, so
+        // fall back to routines whenever RAM found fewer than two looping music
+        // tracks.
+        if (queues is null && sounds.Count(x => x.Kind == "music") < 2)
         {
-            var routines = local.Machine.RoutineCandidates();
-            if (routines.Count > 0)
+            if (!triedRoutines)
+                routineProbe = ProbeRoutines(apuPcs, minSp, maxSp, candidates, driverBanks, idleState);
+            if (routineProbe is { } p)
             {
-                log($"no music queue found in RAM; probing {routines.Count} sound routine candidates");
-                var callCtx = Applied(new ProbeContext(apuPcs, minSp, maxSp, Array.Empty<ushort>(), null, new(), 0,
-                    CallMode: true, DriverReads: candidates.ToArray()));
-                var callAddresses = Sweep(callCtx, routines);
-                var callTriggers = callAddresses.Where(a => a.IsTrigger).ToList();
-                log($"routine triggers: {string.Join(", ", callTriggers.Select(t => $"{t.Address:X4} ({t.Responses.Count} values)"))}");
-                if (callTriggers.Count > 0)
+                var callSounds = p.Sounds ?? CaptureRoutines(p);
+                var callMusical = callSounds.Count(x => x.Kind is "music" or "jingle");
+                var ramMusical = sounds.Count(x => x.Kind is "music" or "jingle");
+                var callMusic = callSounds.Count(x => x.Kind == "music");
+                var ramMusic = sounds.Count(x => x.Kind == "music");
+                if (callMusical > ramMusical
+                    || callMusical == ramMusical && (callMusic > ramMusic || callMusic == ramMusic && callSounds.Count > sounds.Count))
                 {
-                    var ramAddresses = Addresses;
-                    var ramRebased = Rebased;
-                    Addresses = callAddresses;
-                    Rebased = null;
-                    callCtx = Applied(callCtx with { Guarded = callTriggers.Select(t => t.Address).ToArray() });
-                    if (s.Rebase)
-                        (callCtx, callTriggers) = RebaseOnSilence(callCtx, callTriggers, idleState);
-                    callCtx = Applied(callCtx with { Frozen = local.GameOwnedRam() });
-                    log($"freezing {callCtx.Frozen.Count} bytes of game state during captures");
-                    var callSounds = Capture(callCtx, callTriggers);
-                    var callMusic = callSounds.Count(x => x.Kind is "music" or "jingle");
-                    var ramMusic = sounds.Count(x => x.Kind is "music" or "jingle");
-                    if (callMusic > ramMusic || callMusic == ramMusic && callSounds.Count > sounds.Count)
-                        return callSounds;
-                    Addresses = ramAddresses;
-                    Rebased = ramRebased;
+                    Addresses = p.Addresses;
+                    Rebased = p.Rebased;
+                    return callSounds;
                 }
             }
         }
         return sounds;
+    }
+
+    private sealed record RoutineProbe(
+        ProbeContext Ctx, List<AddressReport> Triggers, List<AddressReport> Addresses,
+        string? Rebased, bool Silent, List<Sound>? Sounds = null);
+
+    private RoutineProbe? ProbeRoutines(ushort[] apuPcs, int minSp, int maxSp, List<ushort> candidates,
+        DriverBank[]? driverBanks, object? idleState)
+    {
+        var routines = local.Machine.RoutineCandidates();
+        if (routines.Count == 0)
+            return null;
+        log($"probing {routines.Count} sound routine candidates");
+        var callCtx = Applied(new ProbeContext(apuPcs, minSp, maxSp, Array.Empty<ushort>(), null, new(), 0,
+            CallMode: true, DriverReads: candidates.ToArray(), DriverBanks: driverBanks));
+        var callAddresses = Sweep(callCtx, routines);
+        var callTriggers = callAddresses.Where(a => a.IsTrigger).ToList();
+        log($"routine triggers: {string.Join(", ", callTriggers.Select(t => $"{t.Address:X4} ({t.Responses.Count} values)"))}");
+        if (callTriggers.Count == 0)
+            return null;
+        callCtx = Applied(callCtx with { Guarded = callTriggers.Select(t => t.Address).ToArray() });
+        string? callRebased = null;
+        var callSilent = false;
+        if (s.Rebase)
+            (callCtx, callTriggers, callAddresses, callRebased, callSilent) = RebaseOnSilence(callCtx, callTriggers, callAddresses, idleState);
+        return new RoutineProbe(callCtx, callTriggers, callAddresses, callRebased, callSilent);
+    }
+
+    private List<Sound> CaptureRoutines(RoutineProbe probe)
+    {
+        var callCtx = Applied(probe.Ctx);
+        callCtx = Applied(callCtx with { Frozen = local.GameOwnedRam() });
+        log($"freezing {callCtx.Frozen.Count} bytes of game state during captures");
+        return Capture(callCtx, probe.Triggers);
     }
 
     // Applies the context locally and stamps it with the base checksum the
@@ -114,12 +175,13 @@ internal sealed class Discovery(Prober local, IWorkPool pool, DiscoverySettings 
     // good, so a silence only counts if the triggers still respond on it and
     // some request can still make it play on. Drivers without a stop command
     // are silenced by putting their RAM back as it was while idle.
-    private (ProbeContext, List<AddressReport>) RebaseOnSilence(ProbeContext ctx, List<AddressReport> triggers, object? idleState)
+    private (ProbeContext Ctx, List<AddressReport> Triggers, List<AddressReport> Addresses, string? Rebased, bool Silent) RebaseOnSilence(
+        ProbeContext ctx, List<AddressReport> triggers, List<AddressReport> addresses, object? idleState)
     {
         if (local.IsSilentAfter(null))
         {
             log("base state is already silent");
-            return (ctx, triggers);
+            return (ctx, triggers, addresses, null, true);
         }
 
         var origByAddr = triggers.ToDictionary(t => t.Address, t => t.Responses.Count);
@@ -127,12 +189,13 @@ internal sealed class Discovery(Prober local, IWorkPool pool, DiscoverySettings 
                 .Select(g => (t.Address, g.OrderBy(r => StopPriority(r.Value)).First().Value)))
             .ToList();
 
-        (ProbeContext, List<AddressReport>)? TrySilencers(IEnumerable<(string Name, IReadOnlyList<(ushort Address, byte Value)> Pokes, ushort? Source)> candidates)
+        (ProbeContext Ctx, List<AddressReport> Triggers, List<AddressReport> Addresses, string? Rebased, bool Silent)? TrySilencers(
+            IEnumerable<(string Name, IReadOnlyList<(ushort Address, byte Value)> Pokes, ushort? Source)> candidates)
         {
             foreach (var (name, pokes, source) in candidates)
             {
                 var rebased = Applied(ctx with { Rebase = pokes });
-                if (pokes.Count > 1 && !(bool)pool.Map("silent", rebased, new JsonNode?[] { null })[0]!)
+                if (source is null && !(bool)pool.Map("silent", rebased, new JsonNode?[] { null })[0]!)
                 {
                     log($"  {name} does not silence the music; skipped");
                     continue;
@@ -178,11 +241,10 @@ internal sealed class Discovery(Prober local, IWorkPool pool, DiscoverySettings 
                     continue;
                 }
 
-                Rebased = name;
                 log($"rebased on silence: {name}");
                 var reswept = resweep.Select(a => a.Address).ToHashSet();
-                Addresses = resweep.Concat(Addresses.Where(a => !reswept.Contains(a.Address))).ToList();
-                return (rebased, surviving);
+                var updated = resweep.Concat(addresses.Where(a => !reswept.Contains(a.Address))).ToList();
+                return (rebased, surviving, updated, name, true);
             }
             return null;
         }
@@ -202,30 +264,60 @@ internal sealed class Discovery(Prober local, IWorkPool pool, DiscoverySettings 
                 .ToList();
         }
 
-        // Try common stop commands first ($FF/$FE/$80/$00) before testing every
-        // responding value of every trigger (which may include hundreds of
-        // channel-state false positives while music plays).
+        // Try common stop commands first ($FF/$FE/$80/$00) before testing other
+        // values; cap the remaining silence probes so hundreds of channel-state
+        // false triggers (Journey to Silius, Mr. Gimmick, Shatterhand) do not
+        // spend minutes proving none of their values stop the music.
         const int maxSingleByteSilencers = 6;
+        const int maxSlowSilenceProbes = 64;
         var commonStops = distinct.Where(t => StopPriority(t.Value) < 4).ToList();
         var fastCandidates = SilencersIn(commonStops, maxSingleByteSilencers);
         if (TrySilencers(fastCandidates) is { } fast)
             return fast;
 
-        var rest = distinct.Where(t => StopPriority(t.Value) >= 4).ToList();
+        var rest = SampleForSilence(distinct.Where(t => StopPriority(t.Value) >= 4).ToList(), maxSlowSilenceProbes);
         var fallback = SilencersIn(rest, maxSingleByteSilencers - fastCandidates.Count);
         if (!ctx.CallMode)
         {
             var driverRam = local.DriverRam();
-            if (idleState is not null)
-                fallback.Add(("the driver's idle RAM", local.ValuesIn(idleState, driverRam), null));
-            fallback.Add(("the driver's RAM cleared", driverRam.Select(a => (a, (byte)0)).ToList(), null));
+            if (driverRam.Count > 0)
+            {
+                if (idleState is not null)
+                    fallback.Add(("the driver's idle RAM", local.ValuesIn(idleState, driverRam), null));
+                fallback.Add(("the driver's RAM cleared", driverRam.Select(a => (a, (byte)0)).ToList(), null));
+            }
         }
         if (TrySilencers(fallback) is { } slow)
             return slow;
 
         log("nothing silences the music; effects are isolated by differential capture");
-        return (Applied(ctx with { Rebase = null }), triggers);
+        return (Applied(ctx with { Rebase = null }), triggers, addresses, null, false);
     }
+
+    private static List<(ushort Address, byte Value)> SampleForSilence(List<(ushort Address, byte Value)> rest, int limit)
+    {
+        if (rest.Count <= limit)
+            return rest;
+        return rest
+            .GroupBy(t => t.Address)
+            .SelectMany(g =>
+            {
+                var count = g.Count();
+                return g.OrderBy(t => SecondaryStopPriority(t.Value)).ThenBy(t => t.Value)
+                    .Select((t, rank) => (Test: t, Rank: rank, Count: count));
+            })
+            .OrderBy(x => x.Rank).ThenBy(x => x.Count).ThenBy(x => x.Test.Address)
+            .Take(limit)
+            .Select(x => x.Test)
+            .ToList();
+    }
+
+    private static int SecondaryStopPriority(byte value) => value switch
+    {
+        0xFD or 0xFC or 0xF0 or 0x7F or 0x7E => 0,
+        0x01 or 0x02 or 0x04 or 0x08 or 0x10 or 0x20 or 0x40 => 1,
+        _ => 2,
+    };
 
     private static int StopPriority(byte value) => value switch
     {
